@@ -72,11 +72,11 @@ trans {
           }
 
           State::AwaitingAcquisition => {
-            if (i == idx) {
+            if i == idx {
               i <= i + 1
-            } else if (i < N && !::acquiring[i]) {
+            } else if i < N && !::acquiring[i] {
               state <= State::WaitingInLine
-            } else if (i >= N) {
+            } else if i >= N {
               state <= State::Critical
             }
           }

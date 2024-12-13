@@ -12,19 +12,20 @@ pub enum Decl<'a> {
 
 #[derive(Debug, Clone)]
 pub struct DeclConst<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub name: Name<'a>,
     pub value: ExprInt<'a>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Name<'a> {
-    pub span: Span<'a>,
+    pub name: Span<'a>,
 }
 
 #[derive(Debug, Clone)]
 pub struct DeclEnum<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
+    pub name: Name<'a>,
     pub variants: Vec<Variant<'a>>,
 }
 
@@ -35,7 +36,7 @@ pub struct Variant<'a> {
 
 #[derive(Debug, Clone)]
 pub struct DeclVar<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub name: Name<'a>,
     pub ty: Ty<'a>,
     pub init: Option<Expr<'a>>,
@@ -43,7 +44,7 @@ pub struct DeclVar<'a> {
 
 #[derive(Debug, Clone)]
 pub struct DeclTrans<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub body: Block<'a>
 }
 
@@ -58,24 +59,24 @@ pub enum Ty<'a> {
 
 #[derive(Debug, Clone)]
 pub struct TyInt<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
 }
 
 #[derive(Debug, Clone)]
 pub struct TyBool<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
 }
 
 #[derive(Debug, Clone)]
 pub struct TyRange<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub lo: Expr<'a>,
     pub hi: Expr<'a>,
 }
 
 #[derive(Debug, Clone)]
 pub struct TyArray<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub elem: Box<Ty<'a>>,
     pub len: Expr<'a>,
 }
@@ -87,14 +88,14 @@ pub struct TyPath<'a> {
 
 #[derive(Debug, Clone)]
 pub struct Path<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub absolute: bool,
     pub segments: Vec<Name<'a>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Block<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub stmts: Vec<Stmt<'a>>,
 }
 
@@ -111,7 +112,7 @@ pub enum Stmt<'a> {
 
 #[derive(Debug, Clone)]
 pub struct StmtConstFor<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub var: Name<'a>,
     pub lo: Expr<'a>,
     pub hi: Expr<'a>,
@@ -120,57 +121,63 @@ pub struct StmtConstFor<'a> {
 
 #[derive(Debug, Clone)]
 pub struct StmtDefaulting<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub vars: Vec<DefaultingVar<'a>>,
     pub body: Block<'a>,
 }
 
 #[derive(Debug, Clone)]
 pub enum DefaultingVar<'a> {
-    Var(Name<'a>),
+    Var { pos: Span<'a>, name: Name<'a> },
     Alias(StmtAlias<'a>),
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtAlias<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub name: Name<'a>,
     pub expr: Expr<'a>,
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtIf<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub cond: Expr<'a>,
     pub is_unless: bool,
     pub then_branch: Block<'a>,
-    pub else_branch: Option<Block<'a>>,
+    pub else_branch: Option<Else<'a>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Else<'a> {
+    If(Box<StmtIf<'a>>),
+    Block(Block<'a>),
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtMatch<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub scrutinee: Expr<'a>,
     pub arms: Vec<Arm<'a>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Arm<'a> {
-    pub span: Span<'a>,
-    pub value: Expr<'a>,
+    pub pos: Span<'a>,
+    pub expr: Expr<'a>,
     pub body: Block<'a>,
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtAssignNext<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub name: Name<'a>,
     pub expr: Expr<'a>,
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtEither<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub blocks: Vec<Block<'a>>,
 }
 
@@ -193,33 +200,33 @@ pub struct ExprPath<'a> {
 
 #[derive(Debug, Clone)]
 pub struct ExprBool<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub value: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct ExprInt<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub value: i64,
 }
 
 #[derive(Debug, Clone)]
 pub struct ExprArrayRepeat<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub expr: Box<Expr<'a>>,
     pub len: Box<Expr<'a>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ExprIndex<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub base: Box<Expr<'a>>,
     pub index: Box<Expr<'a>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ExprBinary<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub lhs: Box<Expr<'a>>,
     pub op: BinOp,
     pub rhs: Box<Expr<'a>>,
@@ -243,7 +250,7 @@ pub enum BinOp {
 
 #[derive(Debug, Clone)]
 pub struct ExprUnary<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub op: UnOp,
     pub expr: Box<Expr<'a>>,
 }
@@ -256,7 +263,7 @@ pub enum UnOp {
 
 #[derive(Debug, Clone)]
 pub struct ExprFunc<'a> {
-    pub span: Span<'a>,
+    pub pos: Span<'a>,
     pub name: Name<'a>,
     pub args: Vec<Expr<'a>>,
 }

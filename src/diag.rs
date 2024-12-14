@@ -1,9 +1,11 @@
 use std::fmt::Write;
 
+use crate::ast::Loc;
+
 #[derive(Debug, Clone)]
-pub struct Diag {
+pub struct Diag<'a> {
     pub level: Level,
-    pub line_col: Option<(usize, usize)>,
+    pub loc: Option<Loc<'a>>,
     pub message: String,
 }
 
@@ -19,15 +21,15 @@ pub trait DiagCtx {
     fn warn(&mut self, message: String) {
         self.emit(Diag {
             level: Level::Warn,
-            line_col: None,
+            loc: None,
             message,
         });
     }
 
-    fn warn_at(&mut self, line: usize, col: usize, message: String) {
+    fn warn_at(&mut self, loc: Loc, message: String) {
         self.emit(Diag {
             level: Level::Warn,
-            line_col: Some((line, col)),
+            loc: Some(loc),
             message,
         });
     }
@@ -35,15 +37,15 @@ pub trait DiagCtx {
     fn err(&mut self, message: String) {
         self.emit(Diag {
             level: Level::Err,
-            line_col: None,
+            loc: None,
             message,
         });
     }
 
-    fn err_at(&mut self, line: usize, col: usize, message: String) {
+    fn err_at(&mut self, loc: Loc, message: String) {
         self.emit(Diag {
             level: Level::Err,
-            line_col: Some((line, col)),
+            loc: Some(loc),
             message,
         });
     }
@@ -61,8 +63,8 @@ impl DiagCtx for StderrDiagCtx {
             Level::Err => write!(buf, "err"),
         };
 
-        if let Some((line, pos)) = diag.line_col {
-            let _ = write!(buf, " at L{line}:{pos}");
+        if let Some(loc) = diag.loc {
+            let _ = write!(buf, " at {loc}");
         }
 
         let _ = write!(buf, ": {}", diag.message);

@@ -1,15 +1,17 @@
 use std::collections::HashSet;
+use std::ops::RangeTo;
 use std::sync::LazyLock;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take};
 use nom::character::complete::{alpha1, alphanumeric1, digit1, line_ending, multispace0, space0};
-use nom::combinator::{cut, eof, map, map_res, not, opt, peek, recognize, value, verify};
+use nom::combinator::{
+    consumed, cut, eof, flat_map, map, map_res, not, opt, peek, recognize, value, verify,
+};
 use nom::error::ParseError;
 use nom::multi::{many0, many0_count, many1};
-use nom::sequence::{delimited, pair, preceded, separated_pair, terminated};
+use nom::sequence::{delimited, pair, preceded, separated_pair, terminated, tuple};
 use nom::{AsChar, InputLength, Parser};
-use nom_locate::position;
 use nom_supreme::error::ErrorTree;
 use nom_supreme::final_parser::final_parser;
 
@@ -154,27 +156,31 @@ fn keyword<'a>(kw: Keyword) -> impl FnMut(Span<'a>) -> IResult<'a, Keyword> {
 }
 
 fn decl_const(i: Span<'_>) -> IResult<'_, DeclConst<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, _) = keyword(Keyword::Const)(i)?;
-
-    cut(move |i| {
-        let (i, name) = name(i)?;
-        let (i, _) = ws_tag("=")(i)?;
-        let (i, value) = expr(i)?;
-        let (i, _) = eol(i)?;
-
-        Ok((i, DeclConst { pos, name, value }))
-    })(i)
+    map(
+        leading_ws(terminated(
+            consumed(preceded(
+                keyword(Keyword::Const),
+                cut(separated_pair(name, ws_tag("="), expr)),
+            )),
+            cut(eol),
+        )),
+        |(span, (name, value))| DeclConst {
+            loc: span.into(),
+            name,
+            value,
+        },
+    )(i)
 }
 
 fn name(i: Span<'_>) -> IResult<'_, Name<'_>> {
-    let (i, name) = map_res(ident, |s: Span<'_>| {
-        Some(s)
-            .filter(|s| Keyword::from_str(s.fragment()).is_none())
-            .ok_or("the name is reversed")
-    })(i)?;
-
-    Ok((i, Name { name }))
+    map(
+        map_res(ident, |s: Span<'_>| {
+            Some(s)
+                .filter(|s| Keyword::from_str(s.fragment()).is_none())
+                .ok_or("the name is reversed")
+        }),
+        |name| Name { name },
+    )(i)
 }
 
 fn seq_entry<'a, O1, O2, O3, E, F, G, H>(
@@ -198,68 +204,66 @@ where
 }
 
 fn decl_enum(i: Span<'_>) -> IResult<'_, DeclEnum<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, _) = keyword(Keyword::Enum)(i)?;
-
-    cut(move |i| {
-        let (i, name) = name(i)?;
-        let (i, variants) = delimited(
-            ws_tag("{"),
-            many0(seq_entry(variant, ws_tag(","), ws_tag("}"))),
-            ws_tag("}"),
-        )(i)?;
-        let (i, _) = eol(i)?;
-
-        Ok((
-            i,
-            DeclEnum {
-                pos,
-                name,
-                variants,
-            },
-        ))
-    })(i)
+    map(
+        leading_ws(terminated(
+            consumed(preceded(
+                keyword(Keyword::Enum),
+                cut(pair(
+                    name,
+                    delimited(
+                        ws_tag("{"),
+                        many0(seq_entry(variant, ws_tag(","), ws_tag("}"))),
+                        ws_tag("}"),
+                    ),
+                )),
+            )),
+            cut(eol),
+        )),
+        |(span, (name, variants))| DeclEnum {
+            loc: span.into(),
+            name,
+            variants,
+        },
+    )(i)
 }
 
 fn variant(i: Span<'_>) -> IResult<'_, Variant<'_>> {
-    let (i, name) = name(i)?;
-
-    Ok((i, Variant { name }))
+    map(name, |name| Variant { name })(i)
 }
 
 fn decl_var(i: Span<'_>) -> IResult<'_, DeclVar<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, _) = keyword(Keyword::Var)(i)?;
-
-    cut(move |i| {
-        let (i, name) = name(i)?;
-        let (i, _) = ws_tag(":")(i)?;
-        let (i, ty) = ty(i)?;
-        let (i, init) = opt(preceded(ws_tag("="), expr))(i)?;
-        let (i, _) = eol(i)?;
-
-        Ok((
-            i,
-            DeclVar {
-                pos,
-                name,
-                ty,
-                init,
-            },
-        ))
-    })(i)
+    map(
+        leading_ws(terminated(
+            consumed(preceded(
+                keyword(Keyword::Var),
+                cut(tuple((
+                    name,
+                    preceded(ws_tag(":"), ty),
+                    opt(preceded(ws_tag("="), expr)),
+                ))),
+            )),
+            cut(eol),
+        )),
+        |(span, (name, ty, init))| DeclVar {
+            loc: span.into(),
+            name,
+            ty,
+            init,
+        },
+    )(i)
 }
 
 fn decl_trans(i: Span<'_>) -> IResult<'_, DeclTrans<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, _) = keyword(Keyword::Trans)(i)?;
-
-    cut(move |i| {
-        let (i, body) = block(i)?;
-        let (i, _) = eol(i)?;
-
-        Ok((i, DeclTrans { pos, body }))
-    })(i)
+    map(
+        leading_ws(terminated(
+            consumed(preceded(keyword(Keyword::Trans), cut(block))),
+            cut(eol),
+        )),
+        |(span, body)| DeclTrans {
+            loc: span.into(),
+            body,
+        },
+    )(i)
 }
 
 fn ty(i: Span<'_>) -> IResult<'_, Ty<'_>> {
@@ -288,35 +292,41 @@ fn ty(i: Span<'_>) -> IResult<'_, Ty<'_>> {
 }
 
 fn ty_int(i: Span<'_>) -> IResult<'_, TyInt<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, _) = keyword(Keyword::Int)(i)?;
-
-    Ok((i, TyInt { pos }))
+    map(leading_ws(recognize(keyword(Keyword::Int))), |span| TyInt {
+        loc: span.into(),
+    })(i)
 }
 
 fn ty_bool(i: Span<'_>) -> IResult<'_, TyBool<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, _) = keyword(Keyword::Bool)(i)?;
-
-    Ok((i, TyBool { pos }))
+    map(leading_ws(recognize(keyword(Keyword::Bool))), |span| {
+        TyBool { loc: span.into() }
+    })(i)
 }
 
 fn ty_range(i: Span<'_>) -> IResult<'_, TyRange<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, (lo, hi)) = separated_pair(expr, ws_tag(".."), cut(expr))(i)?;
-
-    Ok((i, TyRange { pos, lo, hi }))
+    map(
+        leading_ws(consumed(separated_pair(expr, ws_tag(".."), cut(expr)))),
+        |(span, (lo, hi))| TyRange {
+            loc: span.into(),
+            lo,
+            hi,
+        },
+    )(i)
 }
 
 fn ty_array(i: Span<'_>) -> IResult<'_, TyArray<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, (elem, len)) = delimited(
-        ws_tag("["),
-        cut(separated_pair(ty.map(Box::new), ws_tag(";"), expr)),
-        cut(ws_tag("]")),
-    )(i)?;
-
-    Ok((i, TyArray { pos, elem, len }))
+    map(
+        leading_ws(consumed(delimited(
+            tag("["),
+            cut(separated_pair(ty.map(Box::new), ws_tag(";"), expr)),
+            cut(ws_tag("]")),
+        ))),
+        |(span, (elem, len))| TyArray {
+            loc: span.into(),
+            elem,
+            len,
+        },
+    )(i)
 }
 
 fn ty_path(i: Span<'_>) -> IResult<'_, TyPath<'_>> {
@@ -324,27 +334,44 @@ fn ty_path(i: Span<'_>) -> IResult<'_, TyPath<'_>> {
 }
 
 fn path(i: Span<'_>) -> IResult<'_, Path<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, absolute) = map(opt(ws_tag("::")), |r| r.is_some())(i)?;
-    let (i, first_segment) = if absolute { cut(name)(i)? } else { name(i)? };
-    let (i, mut segments) = many0(preceded(ws_tag("::"), cut(name)))(i)?;
-    segments.insert(0, first_segment);
+    map(
+        leading_ws(consumed(pair(
+            flat_map(opt(tag("::")), |r| {
+                let absolute = r.is_some();
 
-    Ok((
-        i,
-        Path {
-            pos,
-            absolute,
-            segments,
+                move |i| {
+                    if absolute {
+                        map(cut(name), |name| (absolute, name))(i)
+                    } else {
+                        map(name, |name| (absolute, name))(i)
+                    }
+                }
+            }),
+            many0(preceded(ws_tag("::"), cut(name))),
+        ))),
+        |(span, ((absolute, first_segment), mut segments))| {
+            segments.insert(0, first_segment);
+
+            Path {
+                loc: span.into(),
+                absolute,
+                segments,
+            }
         },
-    ))
+    )(i)
 }
 
 fn block(i: Span<'_>) -> IResult<'_, Block<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, stmts) = delimited(ws_tag("{"), cut(many0(stmt)), cut(ws_tag("}")))(i)?;
-
-    Ok((i, Block { pos, stmts }))
+    map(
+        leading_ws(consumed(preceded(
+            tag("{"),
+            cut(terminated(many0(stmt), ws_tag("}"))),
+        ))),
+        |(span, stmts)| Block {
+            loc: span.into(),
+            stmts,
+        },
+    )(i)
 }
 
 fn stmt(i: Span<'_>) -> IResult<'_, Stmt<'_>> {
@@ -369,54 +396,62 @@ fn stmt(i: Span<'_>) -> IResult<'_, Stmt<'_>> {
             id: Default::default(),
             kind: StmtKind::Match(stmt),
         }),
-        stmt_assign_next.map(|stmt| Stmt {
-            id: Default::default(),
-            kind: StmtKind::AssignNext(stmt),
-        }),
         stmt_either.map(|stmt| Stmt {
             id: Default::default(),
             kind: StmtKind::Either(stmt),
+        }),
+        stmt_assign_next.map(|stmt| Stmt {
+            id: Default::default(),
+            kind: StmtKind::AssignNext(stmt),
         }),
     ))(i)
 }
 
 fn stmt_const_for(i: Span<'_>) -> IResult<'_, StmtConstFor<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, _) = keyword(Keyword::Const)(i)?;
-    let (i, _) = keyword(Keyword::For)(i)?;
-
-    cut(move |i| {
-        let (i, var) = name(i)?;
-        let (i, _) = keyword(Keyword::In)(i)?;
-        let (i, (lo, hi)) = separated_pair(expr, ws_tag(".."), cut(expr))(i)?;
-        let (i, body) = block(i)?;
-        let (i, _) = eol(i)?;
-
-        Ok((
-            i,
-            StmtConstFor {
-                pos,
-                var,
-                lo,
-                hi,
-                body,
-            },
-        ))
-    })(i)
+    map(
+        leading_ws(terminated(
+            consumed(preceded(
+                pair(keyword(Keyword::Const), keyword(Keyword::For)),
+                cut(pair(
+                    separated_pair(
+                        name,
+                        keyword(Keyword::In),
+                        separated_pair(expr, ws_tag(".."), expr),
+                    ),
+                    block,
+                )),
+            )),
+            cut(eol),
+        )),
+        |(span, ((var, (lo, hi)), body))| StmtConstFor {
+            loc: span.into(),
+            var,
+            lo,
+            hi,
+            body,
+        },
+    )(i)
 }
 
 fn stmt_defaulting(i: Span<'_>) -> IResult<'_, StmtDefaulting<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, _) = keyword(Keyword::Defaulting)(i)?;
-
-    cut(move |i| {
-        let (i, vars) = delimited(ws_tag("{"), many0(defaulting_var), ws_tag("}"))(i)?;
-        let (i, _) = keyword(Keyword::In)(i)?;
-        let (i, body) = block(i)?;
-        let (i, _) = eol(i)?;
-
-        Ok((i, StmtDefaulting { pos, vars, body }))
-    })(i)
+    map(
+        leading_ws(terminated(
+            consumed(preceded(
+                keyword(Keyword::Defaulting),
+                cut(separated_pair(
+                    delimited(ws_tag("{"), many0(defaulting_var), ws_tag("}")),
+                    keyword(Keyword::In),
+                    block,
+                )),
+            )),
+            cut(eol),
+        )),
+        |(span, (vars, body))| StmtDefaulting {
+            loc: span.into(),
+            vars,
+            body,
+        },
+    )(i)
 }
 
 fn defaulting_var(i: Span<'_>) -> IResult<'_, DefaultingVar<'_>> {
@@ -427,49 +462,47 @@ fn defaulting_var(i: Span<'_>) -> IResult<'_, DefaultingVar<'_>> {
                 kind: StmtKind::Alias(stmt),
             })
         }),
-        pair(position, cut(terminated(name, eol)))
-            .map(|(pos, name)| DefaultingVar::Var { pos, name }),
+        terminated(name, cut(eol)).map(DefaultingVar::Var),
     ))(i)
 }
 
 fn stmt_alias(i: Span<'_>) -> IResult<'_, StmtAlias<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, _) = keyword(Keyword::Alias)(i)?;
-
-    cut(move |i| {
-        let (i, name) = name(i)?;
-        let (i, _) = ws_tag("=")(i)?;
-        let (i, expr) = expr(i)?;
-        let (i, _) = eol(i)?;
-
-        Ok((i, StmtAlias { pos, name, expr }))
-    })(i)
+    map(
+        leading_ws(terminated(
+            consumed(preceded(
+                keyword(Keyword::Alias),
+                cut(separated_pair(name, ws_tag("="), expr)),
+            )),
+            cut(eol),
+        )),
+        |(span, (name, expr))| StmtAlias {
+            loc: span.into(),
+            name,
+            expr,
+        },
+    )(i)
 }
 
 fn stmt_if(i: Span<'_>) -> IResult<'_, StmtIf<'_>> {
     fn if_branch(i: Span<'_>) -> IResult<'_, StmtIf<'_>> {
-        let (i, pos) = position(i)?;
-        let (i, is_unless) = alt((
-            value(false, keyword(Keyword::If)),
-            value(true, keyword(Keyword::Unless)),
-        ))(i)?;
-
-        cut(move |i| {
-            let (i, cond) = expr(i)?;
-            let (i, then_branch) = block(i)?;
-            let (i, else_branch) = opt(else_)(i)?;
-
-            Ok((
-                i,
-                StmtIf {
-                    pos,
-                    is_unless,
-                    cond,
-                    then_branch,
-                    else_branch,
-                },
-            ))
-        })(i)
+        map(
+            leading_ws(consumed(tuple((
+                alt((
+                    value(false, keyword(Keyword::If)),
+                    value(true, keyword(Keyword::Unless)),
+                )),
+                cut(expr),
+                cut(block),
+                cut(opt(else_)),
+            )))),
+            |(span, (is_unless, cond, then_branch, else_branch))| StmtIf {
+                loc: span.into(),
+                is_unless,
+                cond,
+                then_branch,
+                else_branch,
+            },
+        )(i)
     }
 
     fn else_(i: Span<'_>) -> IResult<'_, Else<'_>> {
@@ -487,27 +520,24 @@ fn stmt_if(i: Span<'_>) -> IResult<'_, StmtIf<'_>> {
         )(i)
     }
 
-    terminated(if_branch, eol)(i)
+    terminated(if_branch, cut(eol))(i)
 }
 
 fn stmt_match(i: Span<'_>) -> IResult<'_, StmtMatch<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, _) = keyword(Keyword::Match)(i)?;
-
-    cut(move |i| {
-        let (i, scrutinee) = expr(i)?;
-        let (i, arms) = delimited(ws_tag("{"), many0(arm), ws_tag("}"))(i)?;
-        let (i, _) = eol(i)?;
-
-        Ok((
-            i,
-            StmtMatch {
-                pos,
-                scrutinee,
-                arms,
-            },
-        ))
-    })(i)
+    map(
+        leading_ws(terminated(
+            consumed(preceded(
+                keyword(Keyword::Match),
+                cut(pair(expr, delimited(ws_tag("{"), many0(arm), ws_tag("}")))),
+            )),
+            cut(eol),
+        )),
+        |(span, (scrutinee, arms))| StmtMatch {
+            loc: span.into(),
+            scrutinee,
+            arms,
+        },
+    )(i)
 }
 
 fn cut_once<F, I, O, E>(f: F) -> impl FnOnce(I) -> nom::IResult<I, O, E>
@@ -522,64 +552,76 @@ where
 }
 
 fn arm(i: Span<'_>) -> IResult<'_, Arm<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, expr) = expr(i)?;
-
-    cut_once(move |i| {
-        let (i, _) = ws_tag("=>")(i)?;
-        let (i, body) = block(i)?;
-        let (i, _) = eol(i)?;
-
-        Ok((i, Arm { pos, expr, body }))
-    })(i)
+    map(
+        leading_ws(terminated(
+            consumed(separated_pair(expr, cut(ws_tag("=>")), cut(block))),
+            cut(eol),
+        )),
+        |(span, (expr, body))| Arm {
+            loc: span.into(),
+            expr,
+            body,
+        },
+    )(i)
 }
 
 fn stmt_assign_next(i: Span<'_>) -> IResult<'_, StmtAssignNext<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, name) = name(i)?;
-    let (i, _) = ws_tag("<=")(i)?;
-
-    cut_once(move |i| {
-        let (i, expr) = expr(i)?;
-        let (i, _) = eol(i)?;
-
-        Ok((i, StmtAssignNext { pos, name, expr }))
-    })(i)
+    map(
+        leading_ws(terminated(
+            consumed(separated_pair(name, ws_tag("<="), cut(expr))),
+            cut(eol),
+        )),
+        |(span, (name, expr))| StmtAssignNext {
+            loc: span.into(),
+            name,
+            expr,
+        },
+    )(i)
 }
 
 fn stmt_either(i: Span<'_>) -> IResult<'_, StmtEither<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, _) = keyword(Keyword::Either)(i)?;
+    map(
+        leading_ws(terminated(
+            consumed(preceded(
+                keyword(Keyword::Either),
+                cut(pair(block, many0(preceded(keyword(Keyword::Or), block)))),
+            )),
+            cut(eol),
+        )),
+        |(span, (first_block, mut blocks))| {
+            blocks.insert(0, first_block);
 
-    cut(move |i| {
-        let (i, first_block) = block(i)?;
-        let (i, mut blocks) = many0(preceded(keyword(Keyword::Or), self::block))(i)?;
-        blocks.insert(0, first_block);
-        let (i, _) = eol(i)?;
-
-        Ok((i, StmtEither { pos, blocks }))
-    })(i)
+            StmtEither {
+                loc: span.into(),
+                blocks,
+            }
+        },
+    )(i)
 }
 
 fn expr(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     expr_and(i)
 }
 
-fn fold0<F, G, I, O, E, T>(mut f: F, init: T, mut g: G) -> impl FnOnce(I) -> nom::IResult<I, T, E>
+fn fold_consumed0<F, G, H, I, O, E, T>(
+    mut f: F,
+    mut g: G,
+    mut reduce: H,
+) -> impl FnMut(I) -> nom::IResult<I, T, E>
 where
-    I: Clone + InputLength,
-    F: Parser<I, O, E>,
-    G: FnMut(T, O) -> T,
+    I: Clone + InputLength + nom::Offset + nom::Slice<RangeTo<usize>>,
+    F: Parser<I, T, E>,
+    G: Parser<I, O, E>,
+    H: FnMut(T, (I, O)) -> T,
     E: ParseError<I>,
 {
-    // this is the same as nom's fold_many0 except where it's FnOnce instead of FnMut.
-    move |mut i| {
-        let mut acc = init;
+    move |input| {
+        let (mut i, mut acc) = f.parse(input.clone())?;
 
         loop {
             let len = i.input_len();
 
-            match f.parse(i.clone()) {
+            match g.parse(i.clone()) {
                 Ok((next_i, o)) => {
                     if next_i.input_len() == len {
                         return Err(nom::Err::Error(E::from_error_kind(
@@ -588,7 +630,10 @@ where
                         )));
                     }
 
-                    acc = g(acc, o);
+                    let index = input.offset(&next_i);
+                    let consumed = input.slice(..index);
+
+                    acc = reduce(acc, (consumed, o));
                     i = next_i;
                 }
 
@@ -600,43 +645,35 @@ where
 }
 
 fn expr_and(i: Span<'_>) -> IResult<'_, Expr<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, lhs) = expr_or(i)?;
-    let (i, expr) = fold0(
-        preceded(ws_tag("&&"), cut(expr_or)).map(Box::new),
-        lhs,
-        |lhs, rhs| Expr {
+    leading_ws(fold_consumed0(
+        expr_or,
+        preceded(ws_tag("&&"), cut(expr_or).map(Box::new)),
+        |lhs, (span, rhs)| Expr {
             id: Default::default(),
             kind: ExprKind::Binary(ExprBinary {
-                pos,
+                loc: span.into(),
                 lhs: Box::new(lhs),
                 op: BinOp::And,
                 rhs,
             }),
         },
-    )(i)?;
-
-    Ok((i, expr))
+    ))(i)
 }
 
 fn expr_or(i: Span<'_>) -> IResult<'_, Expr<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, lhs) = expr_rel(i)?;
-    let (i, expr) = fold0(
-        preceded(ws_tag("||"), cut(expr_rel)).map(Box::new),
-        lhs,
-        |lhs, rhs| Expr {
+    leading_ws(fold_consumed0(
+        expr_rel,
+        preceded(ws_tag("||"), cut(expr_rel).map(Box::new)),
+        |lhs, (span, rhs)| Expr {
             id: Default::default(),
             kind: ExprKind::Binary(ExprBinary {
-                pos,
+                loc: span.into(),
                 lhs: Box::new(lhs),
                 op: BinOp::Or,
                 rhs,
             }),
         },
-    )(i)?;
-
-    Ok((i, expr))
+    ))(i)
 }
 
 fn rel_op(i: Span<'_>) -> IResult<'_, BinOp> {
@@ -651,27 +688,30 @@ fn rel_op(i: Span<'_>) -> IResult<'_, BinOp> {
 }
 
 fn expr_rel(i: Span<'_>) -> IResult<'_, Expr<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, lhs) = expr_addsub(i)?;
-    let (i, rhs) = opt(pair(rel_op, cut(expr_addsub).map(Box::new)))(i)?;
-    let (i, _) = peek(not(rel_op))(i)?;
-
-    Ok((
-        i,
-        if let Some((op, rhs)) = rhs {
-            Expr {
-                id: Default::default(),
-                kind: ExprKind::Binary(ExprBinary {
-                    pos,
-                    lhs: Box::new(lhs),
-                    op,
-                    rhs,
-                }),
+    map(
+        leading_ws(terminated(
+            consumed(pair(
+                expr_addsub,
+                opt(pair(rel_op, cut(expr_addsub).map(Box::new))),
+            )),
+            cut(peek(not(rel_op))),
+        )),
+        |(span, (lhs, rhs))| {
+            if let Some((op, rhs)) = rhs {
+                Expr {
+                    id: Default::default(),
+                    kind: ExprKind::Binary(ExprBinary {
+                        loc: span.into(),
+                        lhs: Box::new(lhs),
+                        op,
+                        rhs,
+                    }),
+                }
+            } else {
+                lhs
             }
-        } else {
-            lhs
         },
-    ))
+    )(i)
 }
 
 fn addsub_op(i: Span<'_>) -> IResult<'_, BinOp> {
@@ -682,23 +722,19 @@ fn addsub_op(i: Span<'_>) -> IResult<'_, BinOp> {
 }
 
 fn expr_addsub(i: Span<'_>) -> IResult<'_, Expr<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, lhs) = expr_unary(i)?;
-    let (i, expr) = fold0(
+    leading_ws(fold_consumed0(
+        expr_unary,
         pair(addsub_op, cut(expr_unary).map(Box::new)),
-        lhs,
-        |lhs, (op, rhs)| Expr {
+        |lhs, (span, (op, rhs))| Expr {
             id: Default::default(),
             kind: ExprKind::Binary(ExprBinary {
-                pos,
+                loc: span.into(),
                 lhs: Box::new(lhs),
                 op,
                 rhs,
             }),
         },
-    )(i)?;
-
-    Ok((i, expr))
+    ))(i)
 }
 
 fn un_op(i: Span<'_>) -> IResult<'_, UnOp> {
@@ -709,41 +745,35 @@ fn un_op(i: Span<'_>) -> IResult<'_, UnOp> {
 }
 
 fn expr_unary(i: Span<'_>) -> IResult<'_, Expr<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, op) = opt(un_op)(i)?;
-
-    if let Some(op) = op {
-        let (i, expr) = map(cut(expr_unary), Box::new)(i)?;
-
-        Ok((
-            i,
-            Expr {
+    leading_ws(alt((
+        map(
+            consumed(pair(un_op, expr_unary.map(Box::new))),
+            |(span, (op, expr))| Expr {
                 id: Default::default(),
-                kind: ExprKind::Unary(ExprUnary { pos, op, expr }),
+                kind: ExprKind::Unary(ExprUnary {
+                    loc: span.into(),
+                    op,
+                    expr,
+                }),
             },
-        ))
-    } else {
-        expr_index(i)
-    }
+        ),
+        expr_index,
+    )))(i)
 }
 
 fn expr_index(i: Span<'_>) -> IResult<'_, Expr<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, lhs) = expr_atom(i)?;
-    let (i, expr) = fold0(
+    leading_ws(fold_consumed0(
+        expr_atom,
         delimited(ws_tag("["), cut(expr).map(Box::new), cut(ws_tag("]"))),
-        lhs,
-        |base, index| Expr {
+        |base, (span, index)| Expr {
             id: Default::default(),
             kind: ExprKind::Index(ExprIndex {
-                pos,
+                loc: span.into(),
                 base: Box::new(base),
                 index,
             }),
         },
-    )(i)?;
-
-    Ok((i, expr))
+    ))(i)
 }
 
 fn expr_atom(i: Span<'_>) -> IResult<'_, Expr<'_>> {
@@ -773,38 +803,50 @@ fn expr_atom(i: Span<'_>) -> IResult<'_, Expr<'_>> {
 }
 
 fn expr_array_repeat(i: Span<'_>) -> IResult<'_, ExprArrayRepeat<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, (expr, len)) = delimited(
-        ws_tag("["),
-        cut(separated_pair(
-            expr.map(Box::new),
-            ws_tag(";"),
-            expr.map(Box::new),
-        )),
-        cut(ws_tag("]")),
-    )(i)?;
-
-    Ok((i, ExprArrayRepeat { pos, expr, len }))
+    map(
+        leading_ws(consumed(delimited(
+            ws_tag("["),
+            cut(separated_pair(
+                expr.map(Box::new),
+                ws_tag(";"),
+                expr.map(Box::new),
+            )),
+            cut(ws_tag("]")),
+        ))),
+        |(span, (expr, len))| ExprArrayRepeat {
+            loc: span.into(),
+            expr,
+            len,
+        },
+    )(i)
 }
 
 fn expr_int(i: Span<'_>) -> IResult<'_, ExprInt<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, value) = map_res(digit1, |s: Span<'_>| s.fragment().parse())(i)?;
-    let (i, _) = peek(cut(not(verify(take(1usize), |s: &Span<'_>| {
-        s.fragment().chars().next().unwrap().is_alphanum()
-    }))))(i)?;
-
-    Ok((i, ExprInt { pos, value }))
+    map(
+        leading_ws(terminated(
+            consumed(map_res(digit1, |s: Span<'_>| s.fragment().parse())),
+            peek(cut(not(verify(take(1usize), |s: &Span<'_>| {
+                s.fragment().chars().next().unwrap().is_alphanum()
+            })))),
+        )),
+        |(span, value)| ExprInt {
+            loc: span.into(),
+            value,
+        },
+    )(i)
 }
 
 fn expr_bool(i: Span<'_>) -> IResult<'_, ExprBool<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, value) = alt((
-        value(true, keyword(Keyword::True)),
-        value(false, keyword(Keyword::False)),
-    ))(i)?;
-
-    Ok((i, ExprBool { pos, value }))
+    map(
+        leading_ws(consumed(alt((
+            value(true, keyword(Keyword::True)),
+            value(false, keyword(Keyword::False)),
+        )))),
+        |(span, value)| ExprBool {
+            loc: span.into(),
+            value,
+        },
+    )(i)
 }
 
 static BUILTIN_NAMES: LazyLock<HashSet<&'static str>> =
@@ -817,18 +859,21 @@ fn builtin_func_name(i: Span<'_>) -> IResult<'_, Name<'_>> {
 }
 
 fn expr_func(i: Span<'_>) -> IResult<'_, ExprFunc<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, name) = builtin_func_name(i)?;
-
-    cut_once(move |i| {
-        let (i, args) = delimited(
-            ws_tag("("),
-            many0(seq_entry(expr, ws_tag(","), ws_tag(")"))),
-            ws_tag(")"),
-        )(i)?;
-
-        Ok((i, ExprFunc { pos, name, args }))
-    })(i)
+    map(
+        leading_ws(consumed(pair(
+            builtin_func_name,
+            cut(delimited(
+                ws_tag("("),
+                many0(seq_entry(expr, ws_tag(","), ws_tag(")"))),
+                ws_tag(")"),
+            )),
+        ))),
+        |(span, (name, args))| ExprFunc {
+            loc: span.into(),
+            name,
+            args,
+        },
+    )(i)
 }
 
 fn expr_path(i: Span<'_>) -> IResult<'_, ExprPath<'_>> {

@@ -5,13 +5,13 @@ use slotmap::Key;
 use crate::ast::visit::{
     DefaultDeclVisitorMut, DefaultExprVisitorMut, DefaultStmtVisitorMut, ExprRecurse, StmtRecurse,
 };
-use crate::ast::{Decl, DiagCtxExt, Expr, HasPos, Stmt};
+use crate::ast::{Decl, Expr, HasLoc, Stmt};
 use crate::diag::DiagCtx;
 
 use super::{ExprInfo, Module, Result, StmtInfo};
 
 impl Module<'_> {
-    pub fn load_ast(&mut self, diag: &mut impl DiagCtx) -> Result {
+    pub(super) fn load_ast(&mut self, diag: &mut impl DiagCtx) -> Result {
         Pass::new(self, diag).run()
     }
 }
@@ -29,12 +29,12 @@ impl<'src, 'm, 'd, D: DiagCtx> Pass<'src, 'm, 'd, D> {
     fn run(mut self) -> Result {
         self.process_decls()?;
 
-        Result::Ok(())
+        Ok(())
     }
 
     fn process_decls(&mut self) -> Result {
         let decl_ids = self.m.decls.keys().collect::<Vec<_>>();
-        let mut result = Result::Ok(());
+        let mut result = Ok(());
 
         for &decl_id in &decl_ids {
             if let Decl::Trans(decl) = &self.m.decls[decl_id] {
@@ -42,12 +42,11 @@ impl<'src, 'm, 'd, D: DiagCtx> Pass<'src, 'm, 'd, D> {
                     self.m.trans_decl_id = decl_id;
                 } else {
                     let prev_decl = &self.m.decls[self.m.trans_decl_id];
-                    self.diag.err_at_pos(
-                        &decl.pos,
+                    self.diag.err_at(
+                        decl.loc,
                         format!(
-                            "found multiple `trans` blocks (previously defined at L{}:{})",
-                            prev_decl.pos().location_line(),
-                            prev_decl.pos().get_utf8_column()
+                            "found multiple `trans` blocks (previously defined {})",
+                            prev_decl.loc().fmt_defined_at(),
                         ),
                     );
                     result = Err(());

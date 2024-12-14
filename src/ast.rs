@@ -1,30 +1,46 @@
 pub mod visit;
 
+use std::fmt::{self, Display};
+
+use derive_more::derive::{Display, From};
 use nom_locate::LocatedSpan;
 use visit::{
     DeclRecurse, DeclVisitor, DeclVisitorMut, ExprRecurse, ExprVisitor, ExprVisitorMut,
     StmtRecurse, StmtVisitor, StmtVisitorMut,
 };
 
-use crate::diag::DiagCtx;
 use crate::sema::{ExprId, StmtId, TyId};
 
 pub type Span<'a> = LocatedSpan<&'a str>;
 
-pub trait DiagCtxExt: DiagCtx {
-    fn warn_at_pos(&mut self, pos: &Span<'_>, message: String) {
-        self.warn_at(pos.location_line() as _, pos.get_utf8_column(), message);
-    }
+#[derive(From, Display, Debug, Clone, Copy)]
+pub enum Loc<'a> {
+    #[display("L{}:{}", _0.location_line(), _0.get_utf8_column())]
+    Span(Span<'a>),
 
-    fn err_at_pos(&mut self, pos: &Span<'_>, message: String) {
-        self.err_at(pos.location_line() as _, pos.get_utf8_column(), message);
+    #[display("<builtin>")]
+    Builtin,
+}
+
+impl<'a> Loc<'a> {
+    pub fn fmt_defined_at(self) -> impl Display + 'a {
+        struct AtDefinedFmt<'a>(Loc<'a>);
+
+        impl Display for AtDefinedFmt<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match self.0 {
+                    Loc::Span(span) => write!(f, "at {span}"),
+                    Loc::Builtin => write!(f, "internally by the compiler"),
+                }
+            }
+        }
+
+        AtDefinedFmt(self)
     }
 }
 
-impl<T: DiagCtx> DiagCtxExt for T {}
-
-pub trait HasPos<'a> {
-    fn pos(&self) -> &Span<'a>;
+pub trait HasLoc<'a> {
+    fn loc(&self) -> Loc<'a>;
 }
 
 #[derive(Debug, Default, Clone)]
@@ -59,21 +75,21 @@ impl<'a> DeclRecurse<'a> for Decl<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for Decl<'a> {
-    fn pos(&self) -> &Span<'a> {
+impl<'a> HasLoc<'a> for Decl<'a> {
+    fn loc(&self) -> Loc<'a> {
         match self {
             Self::Dummy => panic!("called `pos` on `Decl::Dummy`"),
-            Self::Const(decl) => decl.pos(),
-            Self::Enum(decl) => decl.pos(),
-            Self::Var(decl) => decl.pos(),
-            Self::Trans(decl) => decl.pos(),
+            Self::Const(decl) => decl.loc(),
+            Self::Enum(decl) => decl.loc(),
+            Self::Var(decl) => decl.loc(),
+            Self::Trans(decl) => decl.loc(),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct DeclConst<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub name: Name<'a>,
     pub value: Expr<'a>,
 }
@@ -88,9 +104,9 @@ impl<'a> DeclRecurse<'a> for DeclConst<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for DeclConst<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for DeclConst<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
@@ -99,22 +115,22 @@ pub struct Name<'a> {
     pub name: Span<'a>,
 }
 
-impl<'a> HasPos<'a> for Name<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.name
+impl<'a> HasLoc<'a> for Name<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.name.into()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct DeclEnum<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub name: Name<'a>,
     pub variants: Vec<Variant<'a>>,
 }
 
-impl<'a> HasPos<'a> for DeclEnum<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for DeclEnum<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
@@ -123,15 +139,15 @@ pub struct Variant<'a> {
     pub name: Name<'a>,
 }
 
-impl<'a> HasPos<'a> for Variant<'a> {
-    fn pos(&self) -> &Span<'a> {
-        self.name.pos()
+impl<'a> HasLoc<'a> for Variant<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.name.loc()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct DeclVar<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub name: Name<'a>,
     pub ty: Ty<'a>,
     pub init: Option<Expr<'a>>,
@@ -151,15 +167,15 @@ impl<'a> DeclRecurse<'a> for DeclVar<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for DeclVar<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for DeclVar<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct DeclTrans<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub body: Block<'a>,
 }
 
@@ -173,9 +189,9 @@ impl<'a> DeclRecurse<'a> for DeclTrans<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for DeclTrans<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for DeclTrans<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
@@ -185,9 +201,9 @@ pub struct Ty<'a> {
     pub kind: TyKind<'a>,
 }
 
-impl<'a> HasPos<'a> for Ty<'a> {
-    fn pos(&self) -> &Span<'a> {
-        self.kind.pos()
+impl<'a> HasLoc<'a> for Ty<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.kind.loc()
     }
 }
 
@@ -202,64 +218,64 @@ pub enum TyKind<'a> {
     Path(TyPath<'a>),
 }
 
-impl<'a> HasPos<'a> for TyKind<'a> {
-    fn pos(&self) -> &Span<'a> {
+impl<'a> HasLoc<'a> for TyKind<'a> {
+    fn loc(&self) -> Loc<'a> {
         match self {
             Self::Dummy => panic!("called `pos` on `TyKind::Dummy`"),
-            Self::Int(ty) => ty.pos(),
-            Self::Bool(ty) => ty.pos(),
-            Self::Range(ty) => ty.pos(),
-            Self::Array(ty) => ty.pos(),
-            Self::Path(ty) => ty.pos(),
+            Self::Int(ty) => ty.loc(),
+            Self::Bool(ty) => ty.loc(),
+            Self::Range(ty) => ty.loc(),
+            Self::Array(ty) => ty.loc(),
+            Self::Path(ty) => ty.loc(),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct TyInt<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
 }
 
-impl<'a> HasPos<'a> for TyInt<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for TyInt<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct TyBool<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
 }
 
-impl<'a> HasPos<'a> for TyBool<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for TyBool<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct TyRange<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub lo: Expr<'a>,
     pub hi: Expr<'a>,
 }
 
-impl<'a> HasPos<'a> for TyRange<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for TyRange<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct TyArray<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub elem: Box<Ty<'a>>,
     pub len: Expr<'a>,
 }
 
-impl<'a> HasPos<'a> for TyArray<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for TyArray<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
@@ -268,28 +284,28 @@ pub struct TyPath<'a> {
     pub path: Path<'a>,
 }
 
-impl<'a> HasPos<'a> for TyPath<'a> {
-    fn pos(&self) -> &Span<'a> {
-        self.path.pos()
+impl<'a> HasLoc<'a> for TyPath<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.path.loc()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Path<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub absolute: bool,
     pub segments: Vec<Name<'a>>,
 }
 
-impl<'a> HasPos<'a> for Path<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for Path<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Block<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub stmts: Vec<Stmt<'a>>,
 }
 
@@ -307,9 +323,9 @@ impl<'a> StmtRecurse<'a> for Block<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for Block<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for Block<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
@@ -329,9 +345,9 @@ impl<'a> StmtRecurse<'a> for Stmt<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for Stmt<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.kind.pos()
+impl<'a> HasLoc<'a> for Stmt<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.kind.loc()
     }
 }
 
@@ -376,24 +392,24 @@ impl<'a> StmtRecurse<'a> for StmtKind<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for StmtKind<'a> {
-    fn pos(&self) -> &Span<'a> {
+impl<'a> HasLoc<'a> for StmtKind<'a> {
+    fn loc(&self) -> Loc<'a> {
         match self {
             Self::Dummy => panic!("called `pos` on `StmtKind::Dummy`"),
-            Self::ConstFor(stmt) => stmt.pos(),
-            Self::Defaulting(stmt) => stmt.pos(),
-            Self::Alias(stmt) => stmt.pos(),
-            Self::If(stmt) => stmt.pos(),
-            Self::Match(stmt) => stmt.pos(),
-            Self::AssignNext(stmt) => stmt.pos(),
-            Self::Either(stmt) => stmt.pos(),
+            Self::ConstFor(stmt) => stmt.loc(),
+            Self::Defaulting(stmt) => stmt.loc(),
+            Self::Alias(stmt) => stmt.loc(),
+            Self::If(stmt) => stmt.loc(),
+            Self::Match(stmt) => stmt.loc(),
+            Self::AssignNext(stmt) => stmt.loc(),
+            Self::Either(stmt) => stmt.loc(),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtConstFor<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub var: Name<'a>,
     pub lo: Expr<'a>,
     pub hi: Expr<'a>,
@@ -414,15 +430,15 @@ impl<'a> StmtRecurse<'a> for StmtConstFor<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for StmtConstFor<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for StmtConstFor<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtDefaulting<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub vars: Vec<DefaultingVar<'a>>,
     pub body: Block<'a>,
 }
@@ -445,46 +461,46 @@ impl<'a> StmtRecurse<'a> for StmtDefaulting<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for StmtDefaulting<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for StmtDefaulting<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum DefaultingVar<'a> {
-    Var { pos: Span<'a>, name: Name<'a> },
+    Var( Name<'a> ),
     Alias(Stmt<'a>),
 }
 
 impl<'a> StmtRecurse<'a> for DefaultingVar<'a> {
     fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
         match self {
-            Self::Var { .. } => {}
+            Self::Var(_) => {}
             Self::Alias(stmt) => visitor.visit_stmt(stmt),
         }
     }
 
     fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
         match self {
-            Self::Var { .. } => {}
+            Self::Var(_) => {}
             Self::Alias(stmt) => visitor.visit_stmt(stmt),
         }
     }
 }
 
-impl<'a> HasPos<'a> for DefaultingVar<'a> {
-    fn pos(&self) -> &Span<'a> {
+impl<'a> HasLoc<'a> for DefaultingVar<'a> {
+    fn loc(&self) -> Loc<'a> {
         match self {
-            Self::Var { pos, .. } => pos,
-            Self::Alias(stmt) => stmt.pos(),
+            Self::Var(name) => name.loc(),
+            Self::Alias(stmt) => stmt.loc(),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtAlias<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub name: Name<'a>,
     pub expr: Expr<'a>,
 }
@@ -499,15 +515,15 @@ impl<'a> StmtRecurse<'a> for StmtAlias<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for StmtAlias<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for StmtAlias<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtIf<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub cond: Expr<'a>,
     pub is_unless: bool,
     pub then_branch: Block<'a>,
@@ -534,9 +550,9 @@ impl<'a> StmtRecurse<'a> for StmtIf<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for StmtIf<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for StmtIf<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
@@ -562,18 +578,18 @@ impl<'a> StmtRecurse<'a> for Else<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for Else<'a> {
-    fn pos(&self) -> &Span<'a> {
+impl<'a> HasLoc<'a> for Else<'a> {
+    fn loc(&self) -> Loc<'a> {
         match self {
-            Self::If(if_) => if_.pos(),
-            Self::Block(block) => block.pos(),
+            Self::If(if_) => if_.loc(),
+            Self::Block(block) => block.loc(),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtMatch<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub scrutinee: Expr<'a>,
     pub arms: Vec<Arm<'a>>,
 }
@@ -596,15 +612,15 @@ impl<'a> StmtRecurse<'a> for StmtMatch<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for StmtMatch<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for StmtMatch<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Arm<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub expr: Expr<'a>,
     pub body: Block<'a>,
 }
@@ -621,15 +637,15 @@ impl<'a> StmtRecurse<'a> for Arm<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for Arm<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for Arm<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtAssignNext<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub name: Name<'a>,
     pub expr: Expr<'a>,
 }
@@ -644,15 +660,15 @@ impl<'a> StmtRecurse<'a> for StmtAssignNext<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for StmtAssignNext<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for StmtAssignNext<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtEither<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub blocks: Vec<Block<'a>>,
 }
 
@@ -670,9 +686,9 @@ impl<'a> StmtRecurse<'a> for StmtEither<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for StmtEither<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for StmtEither<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
@@ -692,9 +708,9 @@ impl<'a> ExprRecurse<'a> for Expr<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for Expr<'a> {
-    fn pos(&self) -> &Span<'a> {
-        self.kind.pos()
+impl<'a> HasLoc<'a> for Expr<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.kind.loc()
     }
 }
 
@@ -742,18 +758,18 @@ impl<'a> ExprRecurse<'a> for ExprKind<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for ExprKind<'a> {
-    fn pos(&self) -> &Span<'a> {
+impl<'a> HasLoc<'a> for ExprKind<'a> {
+    fn loc(&self) -> Loc<'a> {
         match self {
             Self::Dummy => panic!("called `pos` on `ExprKind::Dummy`"),
-            Self::Path(expr) => expr.pos(),
-            Self::Bool(expr) => expr.pos(),
-            Self::Int(expr) => expr.pos(),
-            Self::ArrayRepeat(expr) => expr.pos(),
-            Self::Index(expr) => expr.pos(),
-            Self::Binary(expr) => expr.pos(),
-            Self::Unary(expr) => expr.pos(),
-            Self::Func(expr) => expr.pos(),
+            Self::Path(expr) => expr.loc(),
+            Self::Bool(expr) => expr.loc(),
+            Self::Int(expr) => expr.loc(),
+            Self::ArrayRepeat(expr) => expr.loc(),
+            Self::Index(expr) => expr.loc(),
+            Self::Binary(expr) => expr.loc(),
+            Self::Unary(expr) => expr.loc(),
+            Self::Func(expr) => expr.loc(),
         }
     }
 }
@@ -763,39 +779,39 @@ pub struct ExprPath<'a> {
     pub path: Path<'a>,
 }
 
-impl<'a> HasPos<'a> for ExprPath<'a> {
-    fn pos(&self) -> &Span<'a> {
-        self.path.pos()
+impl<'a> HasLoc<'a> for ExprPath<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.path.loc()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ExprBool<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub value: bool,
 }
 
-impl<'a> HasPos<'a> for ExprBool<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for ExprBool<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ExprInt<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub value: i64,
 }
 
-impl<'a> HasPos<'a> for ExprInt<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for ExprInt<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ExprArrayRepeat<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub expr: Box<Expr<'a>>,
     pub len: Box<Expr<'a>>,
 }
@@ -812,15 +828,15 @@ impl<'a> ExprRecurse<'a> for ExprArrayRepeat<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for ExprArrayRepeat<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for ExprArrayRepeat<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ExprIndex<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub base: Box<Expr<'a>>,
     pub index: Box<Expr<'a>>,
 }
@@ -837,15 +853,15 @@ impl<'a> ExprRecurse<'a> for ExprIndex<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for ExprIndex<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for ExprIndex<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ExprBinary<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub lhs: Box<Expr<'a>>,
     pub op: BinOp,
     pub rhs: Box<Expr<'a>>,
@@ -863,9 +879,9 @@ impl<'a> ExprRecurse<'a> for ExprBinary<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for ExprBinary<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for ExprBinary<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
@@ -887,7 +903,7 @@ pub enum BinOp {
 
 #[derive(Debug, Clone)]
 pub struct ExprUnary<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub op: UnOp,
     pub expr: Box<Expr<'a>>,
 }
@@ -902,9 +918,9 @@ impl<'a> ExprRecurse<'a> for ExprUnary<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for ExprUnary<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for ExprUnary<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }
 
@@ -916,7 +932,7 @@ pub enum UnOp {
 
 #[derive(Debug, Clone)]
 pub struct ExprFunc<'a> {
-    pub pos: Span<'a>,
+    pub loc: Loc<'a>,
     pub name: Name<'a>,
     pub args: Vec<Expr<'a>>,
 }
@@ -935,8 +951,8 @@ impl<'a> ExprRecurse<'a> for ExprFunc<'a> {
     }
 }
 
-impl<'a> HasPos<'a> for ExprFunc<'a> {
-    fn pos(&self) -> &Span<'a> {
-        &self.pos
+impl<'a> HasLoc<'a> for ExprFunc<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.loc.into()
     }
 }

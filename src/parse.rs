@@ -2,13 +2,13 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take};
 use nom::character::complete::{alpha1, alphanumeric1, digit1, line_ending, multispace0, space0};
-use nom::combinator::{eof, map, map_res, not, opt, peek, recognize, value, verify};
+use nom::combinator::{cut, eof, map, map_res, not, opt, peek, recognize, value, verify};
 use nom::error::ParseError;
 use nom::multi::{many0, many0_count, many1};
 use nom::sequence::{delimited, pair, preceded, separated_pair, terminated};
-use nom::{InputLength, Parser};
+use nom::{AsChar, InputLength, Parser};
 use nom_locate::position;
 use nom_supreme::error::ErrorTree;
 use nom_supreme::final_parser::final_parser;
@@ -45,6 +45,7 @@ enum Keyword {
     Const,
     Enum,
     Var,
+    Trans,
     For,
     In,
     Alias,
@@ -68,6 +69,7 @@ impl Keyword {
             Self::Const => "const",
             Self::Enum => "enum",
             Self::Var => "var",
+            Self::Trans => "trans",
             Self::For => "for",
             Self::In => "in",
             Self::Alias => "alias",
@@ -91,6 +93,7 @@ impl Keyword {
             "const" => Self::Const,
             "enum" => Self::Enum,
             "var" => Self::Var,
+            "trans" => Self::Trans,
             "for" => Self::For,
             "in" => Self::In,
             "alias" => Self::Alias,
@@ -152,12 +155,15 @@ fn keyword<'a>(kw: Keyword) -> impl FnMut(Span<'a>) -> IResult<'a, Keyword> {
 fn decl_const(i: Span<'_>) -> IResult<'_, DeclConst<'_>> {
     let (i, pos) = position(i)?;
     let (i, _) = keyword(Keyword::Const)(i)?;
-    let (i, name) = name(i)?;
-    let (i, _) = ws_tag("=")(i)?;
-    let (i, value) = expr_int(i)?;
-    let (i, _) = eol(i)?;
 
-    Ok((i, DeclConst { pos, name, value }))
+    cut(move |i| {
+        let (i, name) = name(i)?;
+        let (i, _) = ws_tag("=")(i)?;
+        let (i, value) = expr_int(i)?;
+        let (i, _) = eol(i)?;
+
+        Ok((i, DeclConst { pos, name, value }))
+    })(i)
 }
 
 fn name(i: Span<'_>) -> IResult<'_, Name<'_>> {
@@ -193,22 +199,25 @@ where
 fn decl_enum(i: Span<'_>) -> IResult<'_, DeclEnum<'_>> {
     let (i, pos) = position(i)?;
     let (i, _) = keyword(Keyword::Enum)(i)?;
-    let (i, name) = name(i)?;
-    let (i, variants) = delimited(
-        ws_tag("{"),
-        many0(seq_entry(variant, ws_tag(","), ws_tag("}"))),
-        ws_tag("}"),
-    )(i)?;
-    let (i, _) = eol(i)?;
 
-    Ok((
-        i,
-        DeclEnum {
-            pos,
-            name,
-            variants,
-        },
-    ))
+    cut(move |i| {
+        let (i, name) = name(i)?;
+        let (i, variants) = delimited(
+            ws_tag("{"),
+            many0(seq_entry(variant, ws_tag(","), ws_tag("}"))),
+            ws_tag("}"),
+        )(i)?;
+        let (i, _) = eol(i)?;
+
+        Ok((
+            i,
+            DeclEnum {
+                pos,
+                name,
+                variants,
+            },
+        ))
+    })(i)
 }
 
 fn variant(i: Span<'_>) -> IResult<'_, Variant<'_>> {
@@ -220,29 +229,36 @@ fn variant(i: Span<'_>) -> IResult<'_, Variant<'_>> {
 fn decl_var(i: Span<'_>) -> IResult<'_, DeclVar<'_>> {
     let (i, pos) = position(i)?;
     let (i, _) = keyword(Keyword::Var)(i)?;
-    let (i, name) = name(i)?;
-    let (i, _) = ws_tag(":")(i)?;
-    let (i, ty) = ty(i)?;
-    let (i, init) = opt(preceded(ws_tag("="), expr))(i)?;
-    let (i, _) = eol(i)?;
 
-    Ok((
-        i,
-        DeclVar {
-            pos,
-            name,
-            ty,
-            init,
-        },
-    ))
+    cut(move |i| {
+        let (i, name) = name(i)?;
+        let (i, _) = ws_tag(":")(i)?;
+        let (i, ty) = ty(i)?;
+        let (i, init) = opt(preceded(ws_tag("="), expr))(i)?;
+        let (i, _) = eol(i)?;
+
+        Ok((
+            i,
+            DeclVar {
+                pos,
+                name,
+                ty,
+                init,
+            },
+        ))
+    })(i)
 }
 
 fn decl_trans(i: Span<'_>) -> IResult<'_, DeclTrans<'_>> {
     let (i, pos) = position(i)?;
-    let (i, body) = block(i)?;
-    let (i, _) = eol(i)?;
+    let (i, _) = keyword(Keyword::Trans)(i)?;
 
-    Ok((i, DeclTrans { pos, body }))
+    cut(move |i| {
+        let (i, body) = block(i)?;
+        let (i, _) = eol(i)?;
+
+        Ok((i, DeclTrans { pos, body }))
+    })(i)
 }
 
 fn ty(i: Span<'_>) -> IResult<'_, Ty<'_>> {
@@ -271,21 +287,17 @@ fn ty_bool(i: Span<'_>) -> IResult<'_, TyBool<'_>> {
 
 fn ty_range(i: Span<'_>) -> IResult<'_, TyRange<'_>> {
     let (i, pos) = position(i)?;
-    let (i, (lo, hi)) = range(i)?;
+    let (i, (lo, hi)) = separated_pair(expr, ws_tag(".."), cut(expr))(i)?;
 
     Ok((i, TyRange { pos, lo, hi }))
-}
-
-fn range(i: Span<'_>) -> IResult<'_, (Expr<'_>, Expr<'_>)> {
-    separated_pair(expr, ws_tag(".."), expr)(i)
 }
 
 fn ty_array(i: Span<'_>) -> IResult<'_, TyArray<'_>> {
     let (i, pos) = position(i)?;
     let (i, (elem, len)) = delimited(
         ws_tag("["),
-        separated_pair(ty.map(Box::new), ws_tag(";"), expr),
-        ws_tag("]"),
+        cut(separated_pair(ty.map(Box::new), ws_tag(";"), expr)),
+        cut(ws_tag("]")),
     )(i)?;
 
     Ok((i, TyArray { pos, elem, len }))
@@ -298,8 +310,8 @@ fn ty_path(i: Span<'_>) -> IResult<'_, TyPath<'_>> {
 fn path(i: Span<'_>) -> IResult<'_, Path<'_>> {
     let (i, pos) = position(i)?;
     let (i, absolute) = map(opt(ws_tag("::")), |r| r.is_some())(i)?;
-    let (i, first_segment) = name(i)?;
-    let (i, mut segments) = many0(preceded(ws_tag("::"), name))(i)?;
+    let (i, first_segment) = if absolute { cut(name)(i)? } else { name(i)? };
+    let (i, mut segments) = many0(preceded(ws_tag("::"), cut(name)))(i)?;
     segments.insert(0, first_segment);
 
     Ok((
@@ -314,7 +326,7 @@ fn path(i: Span<'_>) -> IResult<'_, Path<'_>> {
 
 fn block(i: Span<'_>) -> IResult<'_, Block<'_>> {
     let (i, pos) = position(i)?;
-    let (i, stmts) = delimited(ws_tag("{"), many0(stmt), ws_tag("}"))(i)?;
+    let (i, stmts) = delimited(ws_tag("{"), cut(many0(stmt)), cut(ws_tag("}")))(i)?;
 
     Ok((i, Block { pos, stmts }))
 }
@@ -335,50 +347,61 @@ fn stmt_const_for(i: Span<'_>) -> IResult<'_, StmtConstFor<'_>> {
     let (i, pos) = position(i)?;
     let (i, _) = keyword(Keyword::Const)(i)?;
     let (i, _) = keyword(Keyword::For)(i)?;
-    let (i, var) = name(i)?;
-    let (i, _) = keyword(Keyword::In)(i)?;
-    let (i, (lo, hi)) = range(i)?;
-    let (i, body) = block(i)?;
-    let (i, _) = eol(i)?;
 
-    Ok((
-        i,
-        StmtConstFor {
-            pos,
-            var,
-            lo,
-            hi,
-            body,
-        },
-    ))
+    cut(move |i| {
+        let (i, var) = name(i)?;
+        let (i, _) = keyword(Keyword::In)(i)?;
+        let (i, (lo, hi)) = separated_pair(expr, ws_tag(".."), cut(expr))(i)?;
+        let (i, body) = block(i)?;
+        let (i, _) = eol(i)?;
+
+        Ok((
+            i,
+            StmtConstFor {
+                pos,
+                var,
+                lo,
+                hi,
+                body,
+            },
+        ))
+    })(i)
 }
 
 fn stmt_defaulting(i: Span<'_>) -> IResult<'_, StmtDefaulting<'_>> {
     let (i, pos) = position(i)?;
-    let (i, vars) = delimited(ws_tag("{"), many0(defaulting_var), ws_tag("}"))(i)?;
-    let (i, _) = keyword(Keyword::In)(i)?;
-    let (i, body) = block(i)?;
-    let (i, _) = eol(i)?;
+    let (i, _) = keyword(Keyword::Defaulting)(i)?;
 
-    Ok((i, StmtDefaulting { pos, vars, body }))
+    cut(move |i| {
+        let (i, vars) = delimited(ws_tag("{"), many0(defaulting_var), ws_tag("}"))(i)?;
+        let (i, _) = keyword(Keyword::In)(i)?;
+        let (i, body) = block(i)?;
+        let (i, _) = eol(i)?;
+
+        Ok((i, StmtDefaulting { pos, vars, body }))
+    })(i)
 }
 
 fn defaulting_var(i: Span<'_>) -> IResult<'_, DefaultingVar<'_>> {
     alt((
         stmt_alias.map(DefaultingVar::Alias),
-        pair(position, terminated(name, eol)).map(|(pos, name)| DefaultingVar::Var { pos, name }),
+        pair(position, cut(terminated(name, eol)))
+            .map(|(pos, name)| DefaultingVar::Var { pos, name }),
     ))(i)
 }
 
 fn stmt_alias(i: Span<'_>) -> IResult<'_, StmtAlias<'_>> {
     let (i, pos) = position(i)?;
     let (i, _) = keyword(Keyword::Alias)(i)?;
-    let (i, name) = name(i)?;
-    let (i, _) = ws_tag("=")(i)?;
-    let (i, expr) = expr(i)?;
-    let (i, _) = eol(i)?;
 
-    Ok((i, StmtAlias { pos, name, expr }))
+    cut(move |i| {
+        let (i, name) = name(i)?;
+        let (i, _) = ws_tag("=")(i)?;
+        let (i, expr) = expr(i)?;
+        let (i, _) = eol(i)?;
+
+        Ok((i, StmtAlias { pos, name, expr }))
+    })(i)
 }
 
 fn stmt_if(i: Span<'_>) -> IResult<'_, StmtIf<'_>> {
@@ -388,29 +411,32 @@ fn stmt_if(i: Span<'_>) -> IResult<'_, StmtIf<'_>> {
             value(false, keyword(Keyword::If)),
             value(true, keyword(Keyword::Unless)),
         ))(i)?;
-        let (i, cond) = expr(i)?;
-        let (i, then_branch) = block(i)?;
-        let (i, else_branch) = opt(else_)(i)?;
 
-        Ok((
-            i,
-            StmtIf {
-                pos,
-                is_unless,
-                cond,
-                then_branch,
-                else_branch,
-            },
-        ))
+        cut(move |i| {
+            let (i, cond) = expr(i)?;
+            let (i, then_branch) = block(i)?;
+            let (i, else_branch) = opt(else_)(i)?;
+
+            Ok((
+                i,
+                StmtIf {
+                    pos,
+                    is_unless,
+                    cond,
+                    then_branch,
+                    else_branch,
+                },
+            ))
+        })(i)
     }
 
     fn else_(i: Span<'_>) -> IResult<'_, Else<'_>> {
         preceded(
             keyword(Keyword::Else),
-            alt((
+            cut(alt((
                 if_branch.map(Box::new).map(Else::If),
                 block.map(Else::Block),
-            )),
+            ))),
         )(i)
     }
 
@@ -419,48 +445,73 @@ fn stmt_if(i: Span<'_>) -> IResult<'_, StmtIf<'_>> {
 
 fn stmt_match(i: Span<'_>) -> IResult<'_, StmtMatch<'_>> {
     let (i, pos) = position(i)?;
-    let (i, scrutinee) = expr(i)?;
-    let (i, arms) = delimited(ws_tag("{"), many0(arm), ws_tag("}"))(i)?;
-    let (i, _) = eol(i)?;
+    let (i, _) = keyword(Keyword::Match)(i)?;
 
-    Ok((
-        i,
-        StmtMatch {
-            pos,
-            scrutinee,
-            arms,
-        },
-    ))
+    cut(move |i| {
+        let (i, scrutinee) = expr(i)?;
+        let (i, arms) = delimited(ws_tag("{"), many0(arm), ws_tag("}"))(i)?;
+        let (i, _) = eol(i)?;
+
+        Ok((
+            i,
+            StmtMatch {
+                pos,
+                scrutinee,
+                arms,
+            },
+        ))
+    })(i)
+}
+
+fn cut_once<F, I, O, E>(f: F) -> impl FnOnce(I) -> nom::IResult<I, O, E>
+where
+    F: FnOnce(I) -> nom::IResult<I, O, E>,
+    E: ParseError<I>,
+{
+    move |i: I| match f(i) {
+        Err(nom::Err::Error(e)) => Err(nom::Err::Failure(e)),
+        r => r,
+    }
 }
 
 fn arm(i: Span<'_>) -> IResult<'_, Arm<'_>> {
     let (i, pos) = position(i)?;
     let (i, expr) = expr(i)?;
-    let (i, _) = ws_tag("=>")(i)?;
-    let (i, body) = block(i)?;
-    let (i, _) = eol(i)?;
 
-    Ok((i, Arm { pos, expr, body }))
+    cut_once(move |i| {
+        let (i, _) = ws_tag("=>")(i)?;
+        let (i, body) = block(i)?;
+        let (i, _) = eol(i)?;
+
+        Ok((i, Arm { pos, expr, body }))
+    })(i)
 }
 
 fn stmt_assign_next(i: Span<'_>) -> IResult<'_, StmtAssignNext<'_>> {
     let (i, pos) = position(i)?;
     let (i, name) = name(i)?;
     let (i, _) = ws_tag("<=")(i)?;
-    let (i, expr) = expr(i)?;
-    let (i, _) = eol(i)?;
 
-    Ok((i, StmtAssignNext { pos, name, expr }))
+    cut_once(move |i| {
+        let (i, expr) = expr(i)?;
+        let (i, _) = eol(i)?;
+
+        Ok((i, StmtAssignNext { pos, name, expr }))
+    })(i)
 }
 
 fn stmt_either(i: Span<'_>) -> IResult<'_, StmtEither<'_>> {
     let (i, pos) = position(i)?;
-    let (i, first_block) = block(i)?;
-    let (i, mut blocks) = many0(preceded(keyword(Keyword::Or), self::block))(i)?;
-    blocks.insert(0, first_block);
-    let (i, _) = eol(i)?;
+    let (i, _) = keyword(Keyword::Either)(i)?;
 
-    Ok((i, StmtEither { pos, blocks }))
+    cut(move |i| {
+        let (i, first_block) = block(i)?;
+        let (i, mut blocks) = many0(preceded(keyword(Keyword::Or), self::block))(i)?;
+        blocks.insert(0, first_block);
+        let (i, _) = eol(i)?;
+
+        Ok((i, StmtEither { pos, blocks }))
+    })(i)
 }
 
 fn expr(i: Span<'_>) -> IResult<'_, Expr<'_>> {
@@ -505,7 +556,7 @@ fn expr_and(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     let (i, pos) = position(i)?;
     let (i, lhs) = expr_or(i)?;
     let (i, expr) = fold0(
-        preceded(ws_tag("&&"), expr_or).map(Box::new),
+        preceded(ws_tag("&&"), cut(expr_or)).map(Box::new),
         lhs,
         |lhs, rhs| {
             Expr::Binary(ExprBinary {
@@ -524,7 +575,7 @@ fn expr_or(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     let (i, pos) = position(i)?;
     let (i, lhs) = expr_rel(i)?;
     let (i, expr) = fold0(
-        preceded(ws_tag("||"), expr_rel).map(Box::new),
+        preceded(ws_tag("||"), cut(expr_rel)).map(Box::new),
         lhs,
         |lhs, rhs| {
             Expr::Binary(ExprBinary {
@@ -553,7 +604,7 @@ fn rel_op(i: Span<'_>) -> IResult<'_, BinOp> {
 fn expr_rel(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     let (i, pos) = position(i)?;
     let (i, lhs) = expr_addsub(i)?;
-    let (i, rhs) = opt(pair(rel_op, expr_addsub.map(Box::new)))(i)?;
+    let (i, rhs) = opt(pair(rel_op, cut(expr_addsub).map(Box::new)))(i)?;
     let (i, _) = peek(not(rel_op))(i)?;
 
     Ok((
@@ -580,10 +631,9 @@ fn addsub_op(i: Span<'_>) -> IResult<'_, BinOp> {
 
 fn expr_addsub(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     let (i, pos) = position(i)?;
-    let (i, mut lhs) = expr_unary(i)?;
-
+    let (i, lhs) = expr_unary(i)?;
     let (i, expr) = fold0(
-        pair(addsub_op, expr_unary.map(Box::new)),
+        pair(addsub_op, cut(expr_unary).map(Box::new)),
         lhs,
         |lhs, (op, rhs)| {
             Expr::Binary(ExprBinary {
@@ -598,19 +648,6 @@ fn expr_addsub(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     Ok((i, expr))
 }
 
-fn expr_unary(i: Span<'_>) -> IResult<'_, Expr<'_>> {
-    let (i, pos) = position(i)?;
-    let (i, op) = opt(un_op)(i)?;
-
-    if let Some(op) = op {
-        let (i, expr) = map(expr_unary, Box::new)(i)?;
-
-        Ok((i, Expr::Unary(ExprUnary { pos, op, expr })))
-    } else {
-        expr_index(i)
-    }
-}
-
 fn un_op(i: Span<'_>) -> IResult<'_, UnOp> {
     leading_ws(alt((
         value(UnOp::Neg, tag("-")),
@@ -618,11 +655,24 @@ fn un_op(i: Span<'_>) -> IResult<'_, UnOp> {
     )))(i)
 }
 
+fn expr_unary(i: Span<'_>) -> IResult<'_, Expr<'_>> {
+    let (i, pos) = position(i)?;
+    let (i, op) = opt(un_op)(i)?;
+
+    if let Some(op) = op {
+        let (i, expr) = map(cut(expr_unary), Box::new)(i)?;
+
+        Ok((i, Expr::Unary(ExprUnary { pos, op, expr })))
+    } else {
+        expr_index(i)
+    }
+}
+
 fn expr_index(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     let (i, pos) = position(i)?;
     let (i, lhs) = expr_atom(i)?;
     let (i, expr) = fold0(
-        delimited(ws_tag("["), expr.map(Box::new), ws_tag("]")),
+        delimited(ws_tag("["), cut(expr).map(Box::new), cut(ws_tag("]"))),
         lhs,
         |base, index| {
             Expr::Index(ExprIndex {
@@ -638,7 +688,7 @@ fn expr_index(i: Span<'_>) -> IResult<'_, Expr<'_>> {
 
 fn expr_atom(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     leading_ws(alt((
-        delimited(tag("("), expr, ws_tag(")")),
+        delimited(tag("("), cut(expr), cut(ws_tag(")"))),
         expr_array_repeat.map(Expr::ArrayRepeat),
         expr_int.map(Expr::Int),
         expr_bool.map(Expr::Bool),
@@ -651,8 +701,12 @@ fn expr_array_repeat(i: Span<'_>) -> IResult<'_, ExprArrayRepeat<'_>> {
     let (i, pos) = position(i)?;
     let (i, (expr, len)) = delimited(
         ws_tag("["),
-        separated_pair(expr.map(Box::new), ws_tag(";"), expr.map(Box::new)),
-        ws_tag("]"),
+        cut(separated_pair(
+            expr.map(Box::new),
+            ws_tag(";"),
+            expr.map(Box::new),
+        )),
+        cut(ws_tag("]")),
     )(i)?;
 
     Ok((i, ExprArrayRepeat { pos, expr, len }))
@@ -661,6 +715,9 @@ fn expr_array_repeat(i: Span<'_>) -> IResult<'_, ExprArrayRepeat<'_>> {
 fn expr_int(i: Span<'_>) -> IResult<'_, ExprInt<'_>> {
     let (i, pos) = position(i)?;
     let (i, value) = map_res(digit1, |s: Span<'_>| s.fragment().parse())(i)?;
+    let (i, _) = peek(cut(not(verify(take(1usize), |s: &Span<'_>| {
+        s.fragment().chars().next().unwrap().is_alphanum()
+    }))))(i)?;
 
     Ok((i, ExprInt { pos, value }))
 }
@@ -687,13 +744,16 @@ fn builtin_func_name(i: Span<'_>) -> IResult<'_, Name<'_>> {
 fn expr_func(i: Span<'_>) -> IResult<'_, ExprFunc<'_>> {
     let (i, pos) = position(i)?;
     let (i, name) = builtin_func_name(i)?;
-    let (i, args) = delimited(
-        ws_tag("("),
-        many0(seq_entry(expr, ws_tag(","), ws_tag(")"))),
-        ws_tag(")"),
-    )(i)?;
 
-    Ok((i, ExprFunc { pos, name, args }))
+    cut_once(move |i| {
+        let (i, args) = delimited(
+            ws_tag("("),
+            many0(seq_entry(expr, ws_tag(","), ws_tag(")"))),
+            ws_tag(")"),
+        )(i)?;
+
+        Ok((i, ExprFunc { pos, name, args }))
+    })(i)
 }
 
 fn expr_path(i: Span<'_>) -> IResult<'_, ExprPath<'_>> {

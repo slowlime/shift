@@ -15,9 +15,10 @@ use nom_supreme::final_parser::final_parser;
 
 use crate::ast::{
     Arm, BinOp, Block, Decl, DeclConst, DeclEnum, DeclTrans, DeclVar, DefaultingVar, Else, Expr,
-    ExprArrayRepeat, ExprBinary, ExprBool, ExprFunc, ExprIndex, ExprInt, ExprPath, ExprUnary, Name,
-    Path, Span, Stmt, StmtAlias, StmtAssignNext, StmtConstFor, StmtDefaulting, StmtEither, StmtIf,
-    StmtMatch, Ty, TyArray, TyBool, TyInt, TyPath, TyRange, UnOp, Variant,
+    ExprArrayRepeat, ExprBinary, ExprBool, ExprFunc, ExprIndex, ExprInt, ExprKind, ExprPath,
+    ExprUnary, Name, Path, Span, Stmt, StmtAlias, StmtAssignNext, StmtConstFor, StmtDefaulting,
+    StmtEither, StmtIf, StmtKind, StmtMatch, Ty, TyArray, TyBool, TyInt, TyKind, TyPath, TyRange,
+    UnOp, Variant,
 };
 
 type IResult<'a, T, E = ErrorTree<Span<'a>>> = nom::IResult<Span<'a>, T, E>;
@@ -159,7 +160,7 @@ fn decl_const(i: Span<'_>) -> IResult<'_, DeclConst<'_>> {
     cut(move |i| {
         let (i, name) = name(i)?;
         let (i, _) = ws_tag("=")(i)?;
-        let (i, value) = expr_int(i)?;
+        let (i, value) = expr(i)?;
         let (i, _) = eol(i)?;
 
         Ok((i, DeclConst { pos, name, value }))
@@ -263,11 +264,26 @@ fn decl_trans(i: Span<'_>) -> IResult<'_, DeclTrans<'_>> {
 
 fn ty(i: Span<'_>) -> IResult<'_, Ty<'_>> {
     alt((
-        ty_int.map(Ty::Int),
-        ty_bool.map(Ty::Bool),
-        ty_range.map(Ty::Range),
-        ty_array.map(Ty::Array),
-        ty_path.map(Ty::Path),
+        ty_int.map(|ty| Ty {
+            id: Default::default(),
+            kind: TyKind::Int(ty),
+        }),
+        ty_bool.map(|ty| Ty {
+            id: Default::default(),
+            kind: TyKind::Bool(ty),
+        }),
+        ty_range.map(|ty| Ty {
+            id: Default::default(),
+            kind: TyKind::Range(ty),
+        }),
+        ty_array.map(|ty| Ty {
+            id: Default::default(),
+            kind: TyKind::Array(ty),
+        }),
+        ty_path.map(|ty| Ty {
+            id: Default::default(),
+            kind: TyKind::Path(ty),
+        }),
     ))(i)
 }
 
@@ -333,13 +349,34 @@ fn block(i: Span<'_>) -> IResult<'_, Block<'_>> {
 
 fn stmt(i: Span<'_>) -> IResult<'_, Stmt<'_>> {
     alt((
-        stmt_const_for.map(Stmt::ConstFor),
-        stmt_defaulting.map(Stmt::Defaulting),
-        stmt_alias.map(Stmt::Alias),
-        stmt_if.map(Stmt::If),
-        stmt_match.map(Stmt::Match),
-        stmt_assign_next.map(Stmt::AssignNext),
-        stmt_either.map(Stmt::Either),
+        stmt_const_for.map(|stmt| Stmt {
+            id: Default::default(),
+            kind: StmtKind::ConstFor(stmt),
+        }),
+        stmt_defaulting.map(|stmt| Stmt {
+            id: Default::default(),
+            kind: StmtKind::Defaulting(stmt),
+        }),
+        stmt_alias.map(|stmt| Stmt {
+            id: Default::default(),
+            kind: StmtKind::Alias(stmt),
+        }),
+        stmt_if.map(|stmt| Stmt {
+            id: Default::default(),
+            kind: StmtKind::If(stmt),
+        }),
+        stmt_match.map(|stmt| Stmt {
+            id: Default::default(),
+            kind: StmtKind::Match(stmt),
+        }),
+        stmt_assign_next.map(|stmt| Stmt {
+            id: Default::default(),
+            kind: StmtKind::AssignNext(stmt),
+        }),
+        stmt_either.map(|stmt| Stmt {
+            id: Default::default(),
+            kind: StmtKind::Either(stmt),
+        }),
     ))(i)
 }
 
@@ -384,7 +421,12 @@ fn stmt_defaulting(i: Span<'_>) -> IResult<'_, StmtDefaulting<'_>> {
 
 fn defaulting_var(i: Span<'_>) -> IResult<'_, DefaultingVar<'_>> {
     alt((
-        stmt_alias.map(DefaultingVar::Alias),
+        stmt_alias.map(|stmt| {
+            DefaultingVar::Alias(Stmt {
+                id: Default::default(),
+                kind: StmtKind::Alias(stmt),
+            })
+        }),
         pair(position, cut(terminated(name, eol)))
             .map(|(pos, name)| DefaultingVar::Var { pos, name }),
     ))(i)
@@ -434,7 +476,12 @@ fn stmt_if(i: Span<'_>) -> IResult<'_, StmtIf<'_>> {
         preceded(
             keyword(Keyword::Else),
             cut(alt((
-                if_branch.map(Box::new).map(Else::If),
+                if_branch.map(|stmt| {
+                    Else::If(Box::new(Stmt {
+                        id: Default::default(),
+                        kind: StmtKind::If(stmt),
+                    }))
+                }),
                 block.map(Else::Block),
             ))),
         )(i)
@@ -558,13 +605,14 @@ fn expr_and(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     let (i, expr) = fold0(
         preceded(ws_tag("&&"), cut(expr_or)).map(Box::new),
         lhs,
-        |lhs, rhs| {
-            Expr::Binary(ExprBinary {
+        |lhs, rhs| Expr {
+            id: Default::default(),
+            kind: ExprKind::Binary(ExprBinary {
                 pos,
                 lhs: Box::new(lhs),
                 op: BinOp::And,
                 rhs,
-            })
+            }),
         },
     )(i)?;
 
@@ -577,13 +625,14 @@ fn expr_or(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     let (i, expr) = fold0(
         preceded(ws_tag("||"), cut(expr_rel)).map(Box::new),
         lhs,
-        |lhs, rhs| {
-            Expr::Binary(ExprBinary {
+        |lhs, rhs| Expr {
+            id: Default::default(),
+            kind: ExprKind::Binary(ExprBinary {
                 pos,
                 lhs: Box::new(lhs),
                 op: BinOp::Or,
                 rhs,
-            })
+            }),
         },
     )(i)?;
 
@@ -610,12 +659,15 @@ fn expr_rel(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     Ok((
         i,
         if let Some((op, rhs)) = rhs {
-            Expr::Binary(ExprBinary {
-                pos,
-                lhs: Box::new(lhs),
-                op,
-                rhs,
-            })
+            Expr {
+                id: Default::default(),
+                kind: ExprKind::Binary(ExprBinary {
+                    pos,
+                    lhs: Box::new(lhs),
+                    op,
+                    rhs,
+                }),
+            }
         } else {
             lhs
         },
@@ -635,13 +687,14 @@ fn expr_addsub(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     let (i, expr) = fold0(
         pair(addsub_op, cut(expr_unary).map(Box::new)),
         lhs,
-        |lhs, (op, rhs)| {
-            Expr::Binary(ExprBinary {
+        |lhs, (op, rhs)| Expr {
+            id: Default::default(),
+            kind: ExprKind::Binary(ExprBinary {
                 pos,
                 lhs: Box::new(lhs),
                 op,
                 rhs,
-            })
+            }),
         },
     )(i)?;
 
@@ -662,7 +715,13 @@ fn expr_unary(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     if let Some(op) = op {
         let (i, expr) = map(cut(expr_unary), Box::new)(i)?;
 
-        Ok((i, Expr::Unary(ExprUnary { pos, op, expr })))
+        Ok((
+            i,
+            Expr {
+                id: Default::default(),
+                kind: ExprKind::Unary(ExprUnary { pos, op, expr }),
+            },
+        ))
     } else {
         expr_index(i)
     }
@@ -674,12 +733,13 @@ fn expr_index(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     let (i, expr) = fold0(
         delimited(ws_tag("["), cut(expr).map(Box::new), cut(ws_tag("]"))),
         lhs,
-        |base, index| {
-            Expr::Index(ExprIndex {
+        |base, index| Expr {
+            id: Default::default(),
+            kind: ExprKind::Index(ExprIndex {
                 pos,
                 base: Box::new(base),
                 index,
-            })
+            }),
         },
     )(i)?;
 
@@ -689,11 +749,26 @@ fn expr_index(i: Span<'_>) -> IResult<'_, Expr<'_>> {
 fn expr_atom(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     leading_ws(alt((
         delimited(tag("("), cut(expr), cut(ws_tag(")"))),
-        expr_array_repeat.map(Expr::ArrayRepeat),
-        expr_int.map(Expr::Int),
-        expr_bool.map(Expr::Bool),
-        expr_func.map(Expr::Func),
-        expr_path.map(Expr::Path),
+        expr_array_repeat.map(|expr| Expr {
+            id: Default::default(),
+            kind: ExprKind::ArrayRepeat(expr),
+        }),
+        expr_int.map(|expr| Expr {
+            id: Default::default(),
+            kind: ExprKind::Int(expr),
+        }),
+        expr_bool.map(|expr| Expr {
+            id: Default::default(),
+            kind: ExprKind::Bool(expr),
+        }),
+        expr_func.map(|expr| Expr {
+            id: Default::default(),
+            kind: ExprKind::Func(expr),
+        }),
+        expr_path.map(|expr| Expr {
+            id: Default::default(),
+            kind: ExprKind::Path(expr),
+        }),
     )))(i)
 }
 

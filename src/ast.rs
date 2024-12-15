@@ -677,8 +677,8 @@ impl<'a> HasLoc<'a> for StmtDefaulting<'a> {
 
 #[derive(Debug, Clone)]
 pub enum DefaultingVar<'a> {
-    Var(Path<'a>),
-    Alias(Stmt<'a>),
+    Var(ResPath<'a>),
+    Alias(StmtAlias<'a>),
 }
 
 impl<'a> StmtRecurse<'a> for DefaultingVar<'a> {
@@ -688,7 +688,7 @@ impl<'a> StmtRecurse<'a> for DefaultingVar<'a> {
     {
         match self {
             Self::Var(_) => {}
-            Self::Alias(stmt) => visitor.visit_stmt(stmt),
+            Self::Alias(stmt) => visitor.visit_alias(stmt),
         }
     }
 
@@ -698,7 +698,7 @@ impl<'a> StmtRecurse<'a> for DefaultingVar<'a> {
     {
         match self {
             Self::Var(_) => {}
-            Self::Alias(stmt) => visitor.visit_stmt(stmt),
+            Self::Alias(stmt) => visitor.visit_alias(stmt),
         }
     }
 }
@@ -787,7 +787,7 @@ impl<'a> HasLoc<'a> for StmtIf<'a> {
 
 #[derive(Debug, Clone)]
 pub enum Else<'a> {
-    If(Box<Stmt<'a>>),
+    If(Box<StmtIf<'a>>),
     Block(Block<'a>),
 }
 
@@ -797,7 +797,7 @@ impl<'a> StmtRecurse<'a> for Else<'a> {
         'a: 'b,
     {
         match self {
-            Self::If(stmt) => visitor.visit_stmt(stmt),
+            Self::If(stmt) => visitor.visit_if(stmt),
             Self::Block(block) => block.recurse(visitor),
         }
     }
@@ -807,7 +807,7 @@ impl<'a> StmtRecurse<'a> for Else<'a> {
         'a: 'b,
     {
         match self {
-            Self::If(stmt) => visitor.visit_stmt(stmt),
+            Self::If(stmt) => visitor.visit_if(stmt),
             Self::Block(block) => block.recurse_mut(visitor),
         }
     }

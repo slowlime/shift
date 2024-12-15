@@ -22,14 +22,14 @@ pub enum Res {
 }
 
 impl Res {
-    pub fn as_ty(self) -> TyNsId {
+    pub fn into_ty_ns_id(self) -> TyNsId {
         match self {
             Self::Ty(ty_ns_id) => ty_ns_id,
             Self::Binding(_) => panic!("called `as_ty` on `Res::Binding`"),
         }
     }
 
-    pub fn as_binding(self) -> BindingId {
+    pub fn into_binding_id(self) -> BindingId {
         match self {
             Self::Ty(_) => panic!("called `as_binding` on `Res::Ty`"),
             Self::Binding(binding_id) => binding_id,
@@ -102,7 +102,7 @@ impl Module<'_> {
             if last {
                 return Ok(result);
             } else {
-                current_scope_id = self.ty_ns[result.as_ty()].scope_id;
+                current_scope_id = self.ty_ns[result.into_ty_ns_id()].scope_id;
                 idx += 1;
             }
         }

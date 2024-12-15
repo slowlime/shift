@@ -2,7 +2,10 @@ use std::mem;
 
 use slotmap::Key;
 
-use crate::ast::{Block, Decl, DeclConst, DeclEnum, DeclTrans, DeclVar, Expr, HasLoc, Loc, Ty};
+use crate::ast::{
+    Block, Decl, DeclConst, DeclEnum, DeclTrans, DeclVar, Expr, HasLoc, Loc, Ty, TyArray, TyBool,
+    TyInt, TyPath, TyRange,
+};
 use crate::diag::DiagCtx;
 
 use super::{BindingId, DeclId, DepGraph, Module, Result, TyDef, TyId};
@@ -189,7 +192,91 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
     }
 
     fn typeck_ty(&mut self, ty: &mut Ty<'src>) -> Result {
-        todo!()
+        match ty {
+            Ty::Dummy => panic!("encountered a dummy type"),
+            Ty::Int(ty) => self.typeck_ty_int(ty),
+            Ty::Bool(ty) => self.typeck_ty_bool(ty),
+            Ty::Range(ty) => self.typeck_ty_range(ty),
+            Ty::Array(ty) => self.typeck_ty_array(ty),
+            Ty::Path(ty) => self.typeck_ty_path(ty),
+        }
+    }
+
+    fn typeck_ty_int(&mut self, ty: &mut TyInt<'src>) -> Result {
+        ty.ty_id = self.m.primitive_tys.int;
+
+        Ok(())
+    }
+
+    fn typeck_ty_bool(&mut self, ty: &mut TyBool<'src>) -> Result {
+        ty.ty_id = self.m.primitive_tys.bool;
+
+        Ok(())
+    }
+
+    fn typeck_ty_range(&mut self, ty: &mut TyRange<'src>) -> Result {
+        ty.ty_id = self.m.primitive_tys.error;
+        let mut result = self.typeck_expr(&mut ty.lo);
+        result = result.and(self.check_ty(
+            ty.lo.loc(),
+            self.m.primitive_tys.int,
+            self.m.exprs[ty.lo.id()].ty_id,
+        ));
+        result = result.and(self.typeck_expr(&mut ty.hi));
+        result = result.and(self.check_ty(
+            ty.hi.loc(),
+            self.m.primitive_tys.int,
+            self.m.exprs[ty.hi.id()].ty_id,
+        ));
+        result?;
+
+        self.const_eval(&mut ty.lo)?;
+        self.const_eval(&mut ty.hi)?;
+
+        let lo = self.m.exprs[ty.lo.id()].value.as_ref().ok_or(())?.to_int();
+        let hi = self.m.exprs[ty.hi.id()].value.as_ref().ok_or(())?.to_int();
+        ty.ty_id = self.add_ty(TyDef::Range(lo, hi));
+
+        Ok(())
+    }
+
+    fn typeck_ty_array(&mut self, ty: &mut TyArray<'src>) -> Result {
+        ty.ty_id = self.m.primitive_tys.error;
+        let mut result = self.typeck_ty(&mut ty.elem);
+        result = result.and(self.typeck_expr(&mut ty.len));
+        result = result.and(self.check_ty(
+            ty.len.loc(),
+            self.m.primitive_tys.int,
+            self.m.exprs[ty.len.id()].ty_id,
+        ));
+        result?;
+
+        self.const_eval(&mut ty.len)?;
+
+        let len = self.m.exprs[ty.len.id()].value.as_ref().ok_or(())?.to_int();
+        let len = match usize::try_from(len) {
+            Ok(len) => len,
+            Err(e) => {
+                self.diag
+                    .err_at(ty.len.loc(), format!("invalid array length: {e}"));
+                return Err(());
+            }
+        };
+
+        ty.ty_id = self.add_ty(TyDef::Array(ty.elem.ty_id(), len));
+
+        Ok(())
+    }
+
+    fn typeck_ty_path(&mut self, ty: &mut TyPath<'src>) -> Result {
+        let ty_ns_id = ty.path.res.unwrap().into_ty_ns_id();
+        ty.ty_id = self.m.ty_ns[ty_ns_id].ty_id;
+
+        if self.is_error_ty(ty.ty_id) {
+            return Err(());
+        }
+
+        Ok(())
     }
 
     fn typeck_block(&mut self, block: &mut Block<'src>) -> Result {

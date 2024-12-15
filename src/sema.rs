@@ -95,6 +95,22 @@ pub enum ConstValue {
     Bool(bool),
 }
 
+impl ConstValue {
+    pub fn to_int(&self) -> i64 {
+        match self {
+            &Self::Int(value) => value,
+            _ => panic!("called `to_int` on a non-integer value"),
+        }
+    }
+
+    pub fn to_bool(&self) -> bool {
+        match self {
+            &Self::Bool(value) => value,
+            _ => panic!("called `to_bool` on a non-bool value"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ExprInfo<'a> {
     pub loc: Loc<'a>,

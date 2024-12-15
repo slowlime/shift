@@ -3,11 +3,10 @@ use std::mem;
 use derive_more::derive::{Display, From};
 
 use crate::ast::visit::{
-    DeclRecurse, DefaultDeclVisitorMut, DefaultStmtVisitorMut, DefaultVisitorMut, StmtRecurse,
-    StmtVisitorMut,
+    DeclRecurse, DefaultDeclVisitorMut, DefaultVisitorMut, StmtRecurse, StmtVisitorMut,
 };
 use crate::ast::{
-    Decl, DeclTrans, DefaultingVar, Else, HasLoc, Name, Path, ResPath, Stmt, StmtAlias,
+    Decl, DeclTrans, DefaultingVar, Else, ExprPath, HasLoc, Name, Path, ResPath, Stmt, StmtAlias,
     StmtAssignNext, StmtConstFor, StmtDefaulting, StmtEither, StmtIf, StmtMatch, TyPath,
 };
 use crate::diag::DiagCtx;
@@ -505,5 +504,13 @@ where
         self.result =
             self.result
                 .and(self.resolve_path(Namespace::Ty, self.current_scope_id, &mut ty.path));
+    }
+
+    fn visit_path(&mut self, expr: &'ast mut ExprPath<'src>) {
+        self.result = self.result.and(self.resolve_path(
+            Namespace::Value,
+            self.current_scope_id,
+            &mut expr.path,
+        ));
     }
 }

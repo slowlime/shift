@@ -1,14 +1,17 @@
+mod decl_dep_graph;
 mod load_ast;
 mod resolve;
 mod typeck;
 
 use std::collections::HashMap;
+use std::fmt::{self, Display};
 
 use slotmap::{new_key_type, SlotMap};
 
 use crate::ast::{Decl, Loc};
 use crate::diag::DiagCtx;
 
+pub use decl_dep_graph::DepGraph;
 pub use resolve::Res;
 
 new_key_type! {
@@ -68,6 +71,7 @@ pub enum BindingKind {
 pub enum TyDef {
     Int,
     Bool,
+    Error,
     Range(i64, i64),
     Array(TyId, usize),
     Enum(DeclId),
@@ -77,27 +81,40 @@ pub enum TyDef {
 pub struct PrimitiveTys {
     pub int: TyId,
     pub bool: TyId,
+    pub error: TyId,
 }
 
 #[derive(Debug, Clone)]
-pub struct StmtInfo {}
+pub struct StmtInfo<'a> {
+    pub loc: Loc<'a>,
+}
 
 #[derive(Debug, Clone)]
-pub struct ExprInfo {
-    pub ty: TyId,
+pub enum ConstValue {
+    Int(i64),
+    Bool(bool),
+}
+
+#[derive(Debug, Clone)]
+pub struct ExprInfo<'a> {
+    pub loc: Loc<'a>,
+    pub ty_id: TyId,
+    pub value: Option<ConstValue>,
 }
 
 pub struct Module<'a> {
     pub decls: SlotMap<DeclId, Decl<'a>>,
     pub scopes: SlotMap<ScopeId, Scope>, // initialized by resolve
     pub bindings: SlotMap<BindingId, Binding<'a>>, // initialized by resolve
-    pub ty_ns: SlotMap<TyNsId, TyNs<'a>>,    // initialized by resolve
-    pub stmts: SlotMap<StmtId, StmtInfo>,    // initialized by load_ast
-    pub exprs: SlotMap<ExprId, ExprInfo>,    // initialized by load_ast
-    pub ty_defs: SlotMap<TyId, TyDef>,       // initialized by typeck
-    pub primitive_tys: PrimitiveTys,         // initialized by typeck
-    pub root_scope_id: ScopeId,              // initialized by resolve
-    pub trans_decl_id: DeclId,               // initialized by load_ast
+    pub ty_ns: SlotMap<TyNsId, TyNs<'a>>, // initialized by resolve
+    pub stmts: SlotMap<StmtId, StmtInfo<'a>>, // initialized by load_ast
+    pub exprs: SlotMap<ExprId, ExprInfo<'a>>, // initialized by load_ast
+    pub ty_defs: SlotMap<TyId, TyDef>,   // initialized by typeck
+    pub primitive_tys: PrimitiveTys,     // initialized by typeck
+    range_tys: HashMap<(i64, i64), TyId>,
+    array_tys: HashMap<(TyId, usize), TyId>,
+    pub root_scope_id: ScopeId, // initialized by resolve
+    pub trans_decl_id: DeclId,  // initialized by load_ast
 }
 
 impl<'a> Module<'a> {
@@ -117,9 +134,33 @@ impl<'a> Module<'a> {
             exprs: Default::default(),
             ty_defs: Default::default(),
             primitive_tys: Default::default(),
+            range_tys: Default::default(),
+            array_tys: Default::default(),
             root_scope_id: Default::default(),
             trans_decl_id: Default::default(),
         }
+    }
+
+    pub fn display_ty(&self, ty_id: TyId) -> impl Display + '_ {
+        struct Fmt<'a> {
+            m: &'a Module<'a>,
+            ty_id: TyId,
+        }
+
+        impl Display for Fmt<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match self.m.ty_defs[self.ty_id] {
+                    TyDef::Int => write!(f, "int"),
+                    TyDef::Bool => write!(f, "bool"),
+                    TyDef::Error => write!(f, "<error>"),
+                    TyDef::Range(lo, hi) => write!(f, "{lo}..{hi}"),
+                    TyDef::Array(ty_id, len) => write!(f, "[{}; {len}]", self.m.display_ty(ty_id)),
+                    TyDef::Enum(decl_id) => write!(f, "{}", self.m.decls[decl_id].name()),
+                }
+            }
+        }
+
+        Fmt { m: self, ty_id }
     }
 }
 
@@ -128,6 +169,9 @@ pub fn process<'a>(decls: Vec<Decl<'a>>, diag: &mut impl DiagCtx) -> (Module<'a>
 
     let result = (|| {
         module.load_ast(diag)?;
+        module.resolve(diag)?;
+        let decl_deps = module.decl_dep_graph(diag)?;
+        module.typeck(diag, &decl_deps)?;
 
         Ok(())
     })();

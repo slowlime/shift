@@ -163,10 +163,10 @@ fn decl_const(i: Span<'_>) -> IResult<'_, DeclConst<'_>> {
             )),
             cut(eol),
         )),
-        |(span, (name, value))| DeclConst {
+        |(span, (name, expr))| DeclConst {
             loc: span.into(),
             name,
-            value,
+            expr,
             binding_id: Default::default(),
         },
     )(i)

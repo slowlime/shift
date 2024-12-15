@@ -89,7 +89,7 @@ where
     D: DiagCtx,
 {
     fn visit_stmt(&mut self, stmt: &'ast mut Stmt<'src>) {
-        let stmt_id = self.pass.m.stmts.insert(StmtInfo {});
+        let stmt_id = self.pass.m.stmts.insert(StmtInfo { loc: stmt.loc() });
 
         match stmt {
             Stmt::Dummy => {}
@@ -113,7 +113,9 @@ where
 {
     fn visit_expr(&mut self, expr: &'ast mut Expr<'src>) {
         let expr_id = self.pass.m.exprs.insert(ExprInfo {
-            ty: Default::default(),
+            loc: expr.loc(),
+            ty_id: Default::default(),
+            value: None,
         });
 
         match expr {

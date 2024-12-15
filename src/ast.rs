@@ -64,6 +64,16 @@ impl<'a> Decl<'a> {
         }
     }
 
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Dummy => "<dummy>",
+            Self::Const(decl) => decl.name.name.fragment(),
+            Self::Enum(decl) => decl.name.name.fragment(),
+            Self::Var(decl) => decl.name.name.fragment(),
+            Self::Trans(_) => "<trans>",
+        }
+    }
+
     pub fn as_const(&self) -> &DeclConst<'a> {
         match self {
             Self::Const(decl) => decl,
@@ -165,7 +175,7 @@ impl<'a> HasLoc<'a> for Decl<'a> {
 pub struct DeclConst<'a> {
     pub loc: Loc<'a>,
     pub name: Name<'a>,
-    pub value: Expr<'a>,
+    pub expr: Expr<'a>,
     pub binding_id: BindingId,
 }
 
@@ -174,14 +184,14 @@ impl<'a> DeclRecurse<'a> for DeclConst<'a> {
     where
         'a: 'b,
     {
-        visitor.visit_expr(&self.value);
+        visitor.visit_expr(&self.expr);
     }
 
     fn recurse_mut<'b, V: DeclVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
     where
         'a: 'b,
     {
-        visitor.visit_expr(&mut self.value);
+        visitor.visit_expr(&mut self.expr);
     }
 }
 
@@ -243,6 +253,8 @@ impl<'a> DeclRecurse<'a> for DeclVar<'a> {
     where
         'a: 'b,
     {
+        visitor.visit_ty(&self.ty);
+
         if let Some(init) = &self.init {
             visitor.visit_expr(init);
         }
@@ -252,6 +264,8 @@ impl<'a> DeclRecurse<'a> for DeclVar<'a> {
     where
         'a: 'b,
     {
+        visitor.visit_ty(&mut self.ty);
+
         if let Some(init) = &mut self.init {
             visitor.visit_expr(init);
         }
@@ -301,6 +315,19 @@ pub enum Ty<'a> {
     Range(TyRange<'a>),
     Array(TyArray<'a>),
     Path(TyPath<'a>),
+}
+
+impl Ty<'_> {
+    pub fn ty_id(&self) -> TyId {
+        match self {
+            Self::Dummy => panic!("called `ty_id` on `Ty::Dummy`"),
+            Self::Int(ty) => ty.ty_id,
+            Self::Bool(ty) => ty.ty_id,
+            Self::Range(ty) => ty.ty_id,
+            Self::Array(ty) => ty.ty_id,
+            Self::Path(ty) => ty.ty_id,
+        }
+    }
 }
 
 impl<'a> Recurse<'a> for Ty<'a> {
@@ -549,6 +576,21 @@ pub enum Stmt<'a> {
     Match(StmtMatch<'a>),
     AssignNext(StmtAssignNext<'a>),
     Either(StmtEither<'a>),
+}
+
+impl Stmt<'_> {
+    pub fn id(&self) -> StmtId {
+        match self {
+            Stmt::Dummy => panic!("called `id` on `Stmt::Dummy`"),
+            Stmt::ConstFor(stmt) => stmt.id,
+            Stmt::Defaulting(stmt) => stmt.id,
+            Stmt::Alias(stmt) => stmt.id,
+            Stmt::If(stmt) => stmt.id,
+            Stmt::Match(stmt) => stmt.id,
+            Stmt::AssignNext(stmt) => stmt.id,
+            Stmt::Either(stmt) => stmt.id,
+        }
+    }
 }
 
 impl<'a> StmtRecurse<'a> for Stmt<'a> {
@@ -966,6 +1008,22 @@ pub enum Expr<'a> {
     Binary(ExprBinary<'a>),
     Unary(ExprUnary<'a>),
     Func(ExprFunc<'a>),
+}
+
+impl Expr<'_> {
+    pub fn id(&self) -> ExprId {
+        match self {
+            Expr::Dummy => panic!("called `id` on `Expr::Dummy`"),
+            Expr::Path(expr) => expr.id,
+            Expr::Bool(expr) => expr.id,
+            Expr::Int(expr) => expr.id,
+            Expr::ArrayRepeat(expr) => expr.id,
+            Expr::Index(expr) => expr.id,
+            Expr::Binary(expr) => expr.id,
+            Expr::Unary(expr) => expr.id,
+            Expr::Func(expr) => expr.id,
+        }
+    }
 }
 
 impl<'a> Recurse<'a> for Expr<'a> {

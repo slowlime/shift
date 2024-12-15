@@ -6,36 +6,51 @@ use std::collections::HashMap;
 
 use slotmap::{new_key_type, SlotMap};
 
-use crate::ast::Decl;
+use crate::ast::{Decl, Loc};
 use crate::diag::DiagCtx;
+
+pub use resolve::Res;
 
 new_key_type! {
     pub struct DeclId;
     pub struct TyId;
+    pub struct TyNsId;
     pub struct ExprId;
     pub struct StmtId;
     pub struct ScopeId;
     pub struct BindingId;
 }
 
-pub type Result = std::result::Result<(), ()>;
+pub type Result<T = ()> = std::result::Result<T, ()>;
 
 #[derive(Debug, Clone)]
 pub struct Scope {
     pub parent: Option<ScopeId>,
-    pub tys: HashMap<String, TyNs>,
+    pub tys: HashMap<String, TyNsId>,
     pub values: HashMap<String, BindingId>,
 }
 
-#[derive(Debug, Clone)]
-pub struct TyNs {
-    pub ty_id: TyId,
-    pub scope: Scope,
+impl Scope {
+    pub fn new(parent: Option<ScopeId>) -> Self {
+        Self {
+            parent,
+            tys: Default::default(),
+            values: Default::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
-pub struct Binding {
-    pub ty: TyId,
+pub struct TyNs<'a> {
+    pub loc: Loc<'a>,
+    pub ty_id: TyId,
+    pub scope_id: ScopeId,
+}
+
+#[derive(Debug, Clone)]
+pub struct Binding<'a> {
+    pub ty_id: TyId,
+    pub loc: Loc<'a>,
     pub name: Option<String>,
     pub kind: BindingKind,
 }
@@ -43,6 +58,7 @@ pub struct Binding {
 #[derive(Debug, Clone)]
 pub enum BindingKind {
     Const(DeclId),
+    ConstFor(StmtId),
     Var(DeclId),
     Alias(StmtId),
     Variant(DeclId, usize),
@@ -74,13 +90,14 @@ pub struct ExprInfo {
 pub struct Module<'a> {
     pub decls: SlotMap<DeclId, Decl<'a>>,
     pub scopes: SlotMap<ScopeId, Scope>, // initialized by resolve
-    pub bindings: SlotMap<BindingId, Binding>, // initialized by resolve
-    pub stmts: SlotMap<StmtId, StmtInfo>, // initialized by load_ast
-    pub exprs: SlotMap<ExprId, ExprInfo>, // initialized by load_ast
-    pub ty_defs: SlotMap<TyId, TyDef>,   // initialized by typeck
-    pub primitive_tys: PrimitiveTys,     // initialized by typeck
-    pub root_scope_id: ScopeId,          // initialized by resolve
-    pub trans_decl_id: DeclId,           // initialized by load_ast
+    pub bindings: SlotMap<BindingId, Binding<'a>>, // initialized by resolve
+    pub ty_ns: SlotMap<TyNsId, TyNs<'a>>,    // initialized by resolve
+    pub stmts: SlotMap<StmtId, StmtInfo>,    // initialized by load_ast
+    pub exprs: SlotMap<ExprId, ExprInfo>,    // initialized by load_ast
+    pub ty_defs: SlotMap<TyId, TyDef>,       // initialized by typeck
+    pub primitive_tys: PrimitiveTys,         // initialized by typeck
+    pub root_scope_id: ScopeId,              // initialized by resolve
+    pub trans_decl_id: DeclId,               // initialized by load_ast
 }
 
 impl<'a> Module<'a> {
@@ -95,6 +112,7 @@ impl<'a> Module<'a> {
             decls: decl_map,
             scopes: Default::default(),
             bindings: Default::default(),
+            ty_ns: Default::default(),
             stmts: Default::default(),
             exprs: Default::default(),
             ty_defs: Default::default(),

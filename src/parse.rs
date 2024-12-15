@@ -17,10 +17,9 @@ use nom_supreme::final_parser::final_parser;
 
 use crate::ast::{
     Arm, BinOp, Block, Decl, DeclConst, DeclEnum, DeclTrans, DeclVar, DefaultingVar, Else, Expr,
-    ExprArrayRepeat, ExprBinary, ExprBool, ExprFunc, ExprIndex, ExprInt, ExprKind, ExprPath,
-    ExprUnary, Name, Path, Span, Stmt, StmtAlias, StmtAssignNext, StmtConstFor, StmtDefaulting,
-    StmtEither, StmtIf, StmtKind, StmtMatch, Ty, TyArray, TyBool, TyInt, TyKind, TyPath, TyRange,
-    UnOp, Variant,
+    ExprArrayRepeat, ExprBinary, ExprBool, ExprFunc, ExprIndex, ExprInt, ExprPath, ExprUnary, Name,
+    Path, ResPath, Span, Stmt, StmtAlias, StmtAssignNext, StmtConstFor, StmtDefaulting, StmtEither,
+    StmtIf, StmtMatch, Ty, TyArray, TyBool, TyInt, TyPath, TyRange, UnOp, Variant,
 };
 
 type IResult<'a, T, E = ErrorTree<Span<'a>>> = nom::IResult<Span<'a>, T, E>;
@@ -168,6 +167,7 @@ fn decl_const(i: Span<'_>) -> IResult<'_, DeclConst<'_>> {
             loc: span.into(),
             name,
             value,
+            binding_id: Default::default(),
         },
     )(i)
 }
@@ -223,12 +223,16 @@ fn decl_enum(i: Span<'_>) -> IResult<'_, DeclEnum<'_>> {
             loc: span.into(),
             name,
             variants,
+            ty_ns_id: Default::default(),
         },
     )(i)
 }
 
 fn variant(i: Span<'_>) -> IResult<'_, Variant<'_>> {
-    map(name, |name| Variant { name })(i)
+    map(name, |name| Variant {
+        name,
+        binding_id: Default::default(),
+    })(i)
 }
 
 fn decl_var(i: Span<'_>) -> IResult<'_, DeclVar<'_>> {
@@ -249,6 +253,7 @@ fn decl_var(i: Span<'_>) -> IResult<'_, DeclVar<'_>> {
             name,
             ty,
             init,
+            binding_id: Default::default(),
         },
     )(i)
 }
@@ -268,38 +273,27 @@ fn decl_trans(i: Span<'_>) -> IResult<'_, DeclTrans<'_>> {
 
 fn ty(i: Span<'_>) -> IResult<'_, Ty<'_>> {
     alt((
-        ty_int.map(|ty| Ty {
-            id: Default::default(),
-            kind: TyKind::Int(ty),
-        }),
-        ty_bool.map(|ty| Ty {
-            id: Default::default(),
-            kind: TyKind::Bool(ty),
-        }),
-        ty_range.map(|ty| Ty {
-            id: Default::default(),
-            kind: TyKind::Range(ty),
-        }),
-        ty_array.map(|ty| Ty {
-            id: Default::default(),
-            kind: TyKind::Array(ty),
-        }),
-        ty_path.map(|ty| Ty {
-            id: Default::default(),
-            kind: TyKind::Path(ty),
-        }),
+        ty_int.map(Ty::Int),
+        ty_bool.map(Ty::Bool),
+        ty_range.map(Ty::Range),
+        ty_array.map(Ty::Array),
+        ty_path.map(Ty::Path),
     ))(i)
 }
 
 fn ty_int(i: Span<'_>) -> IResult<'_, TyInt<'_>> {
     map(leading_ws(recognize(keyword(Keyword::Int))), |span| TyInt {
+        ty_id: Default::default(),
         loc: span.into(),
     })(i)
 }
 
 fn ty_bool(i: Span<'_>) -> IResult<'_, TyBool<'_>> {
     map(leading_ws(recognize(keyword(Keyword::Bool))), |span| {
-        TyBool { loc: span.into() }
+        TyBool {
+            ty_id: Default::default(),
+            loc: span.into(),
+        }
     })(i)
 }
 
@@ -307,6 +301,7 @@ fn ty_range(i: Span<'_>) -> IResult<'_, TyRange<'_>> {
     map(
         leading_ws(consumed(separated_pair(expr, ws_tag(".."), cut(expr)))),
         |(span, (lo, hi))| TyRange {
+            ty_id: Default::default(),
             loc: span.into(),
             lo,
             hi,
@@ -322,6 +317,7 @@ fn ty_array(i: Span<'_>) -> IResult<'_, TyArray<'_>> {
             cut(ws_tag("]")),
         ))),
         |(span, (elem, len))| TyArray {
+            ty_id: Default::default(),
             loc: span.into(),
             elem,
             len,
@@ -330,7 +326,14 @@ fn ty_array(i: Span<'_>) -> IResult<'_, TyArray<'_>> {
 }
 
 fn ty_path(i: Span<'_>) -> IResult<'_, TyPath<'_>> {
-    map(path, |path| TyPath { path })(i)
+    map(res_path, |path| TyPath {
+        ty_id: Default::default(),
+        path,
+    })(i)
+}
+
+fn res_path(i: Span<'_>) -> IResult<'_, ResPath<'_>> {
+    map(path, |path| ResPath { path, res: None })(i)
 }
 
 fn path(i: Span<'_>) -> IResult<'_, Path<'_>> {
@@ -376,34 +379,13 @@ fn block(i: Span<'_>) -> IResult<'_, Block<'_>> {
 
 fn stmt(i: Span<'_>) -> IResult<'_, Stmt<'_>> {
     alt((
-        stmt_const_for.map(|stmt| Stmt {
-            id: Default::default(),
-            kind: StmtKind::ConstFor(stmt),
-        }),
-        stmt_defaulting.map(|stmt| Stmt {
-            id: Default::default(),
-            kind: StmtKind::Defaulting(stmt),
-        }),
-        stmt_alias.map(|stmt| Stmt {
-            id: Default::default(),
-            kind: StmtKind::Alias(stmt),
-        }),
-        stmt_if.map(|stmt| Stmt {
-            id: Default::default(),
-            kind: StmtKind::If(stmt),
-        }),
-        stmt_match.map(|stmt| Stmt {
-            id: Default::default(),
-            kind: StmtKind::Match(stmt),
-        }),
-        stmt_either.map(|stmt| Stmt {
-            id: Default::default(),
-            kind: StmtKind::Either(stmt),
-        }),
-        stmt_assign_next.map(|stmt| Stmt {
-            id: Default::default(),
-            kind: StmtKind::AssignNext(stmt),
-        }),
+        stmt_const_for.map(Stmt::ConstFor),
+        stmt_defaulting.map(Stmt::Defaulting),
+        stmt_alias.map(Stmt::Alias),
+        stmt_if.map(Stmt::If),
+        stmt_match.map(Stmt::Match),
+        stmt_either.map(Stmt::Either),
+        stmt_assign_next.map(Stmt::AssignNext),
     ))(i)
 }
 
@@ -424,11 +406,13 @@ fn stmt_const_for(i: Span<'_>) -> IResult<'_, StmtConstFor<'_>> {
             cut(eol),
         )),
         |(span, ((var, (lo, hi)), body))| StmtConstFor {
+            id: Default::default(),
             loc: span.into(),
             var,
             lo,
             hi,
             body,
+            binding_id: Default::default(),
         },
     )(i)
 }
@@ -447,6 +431,7 @@ fn stmt_defaulting(i: Span<'_>) -> IResult<'_, StmtDefaulting<'_>> {
             cut(eol),
         )),
         |(span, (vars, body))| StmtDefaulting {
+            id: Default::default(),
             loc: span.into(),
             vars,
             body,
@@ -456,13 +441,8 @@ fn stmt_defaulting(i: Span<'_>) -> IResult<'_, StmtDefaulting<'_>> {
 
 fn defaulting_var(i: Span<'_>) -> IResult<'_, DefaultingVar<'_>> {
     alt((
-        stmt_alias.map(|stmt| {
-            DefaultingVar::Alias(Stmt {
-                id: Default::default(),
-                kind: StmtKind::Alias(stmt),
-            })
-        }),
-        terminated(name, cut(eol)).map(DefaultingVar::Var),
+        stmt_alias.map(Stmt::Alias).map(DefaultingVar::Alias),
+        terminated(path, cut(eol)).map(DefaultingVar::Var),
     ))(i)
 }
 
@@ -476,9 +456,11 @@ fn stmt_alias(i: Span<'_>) -> IResult<'_, StmtAlias<'_>> {
             cut(eol),
         )),
         |(span, (name, expr))| StmtAlias {
+            id: Default::default(),
             loc: span.into(),
             name,
             expr,
+            binding_id: Default::default(),
         },
     )(i)
 }
@@ -496,6 +478,7 @@ fn stmt_if(i: Span<'_>) -> IResult<'_, StmtIf<'_>> {
                 cut(opt(else_)),
             )))),
             |(span, (is_unless, cond, then_branch, else_branch))| StmtIf {
+                id: Default::default(),
                 loc: span.into(),
                 is_unless,
                 cond,
@@ -509,12 +492,7 @@ fn stmt_if(i: Span<'_>) -> IResult<'_, StmtIf<'_>> {
         preceded(
             keyword(Keyword::Else),
             cut(alt((
-                if_branch.map(|stmt| {
-                    Else::If(Box::new(Stmt {
-                        id: Default::default(),
-                        kind: StmtKind::If(stmt),
-                    }))
-                }),
+                if_branch.map(|stmt| Else::If(Box::new(Stmt::If(stmt)))),
                 block.map(Else::Block),
             ))),
         )(i)
@@ -533,6 +511,7 @@ fn stmt_match(i: Span<'_>) -> IResult<'_, StmtMatch<'_>> {
             cut(eol),
         )),
         |(span, (scrutinee, arms))| StmtMatch {
+            id: Default::default(),
             loc: span.into(),
             scrutinee,
             arms,
@@ -568,12 +547,13 @@ fn arm(i: Span<'_>) -> IResult<'_, Arm<'_>> {
 fn stmt_assign_next(i: Span<'_>) -> IResult<'_, StmtAssignNext<'_>> {
     map(
         leading_ws(terminated(
-            consumed(separated_pair(name, ws_tag("<="), cut(expr))),
+            consumed(separated_pair(res_path, ws_tag("<="), cut(expr))),
             cut(eol),
         )),
-        |(span, (name, expr))| StmtAssignNext {
+        |(span, (path, expr))| StmtAssignNext {
+            id: Default::default(),
             loc: span.into(),
-            name,
+            path,
             expr,
         },
     )(i)
@@ -592,6 +572,7 @@ fn stmt_either(i: Span<'_>) -> IResult<'_, StmtEither<'_>> {
             blocks.insert(0, first_block);
 
             StmtEither {
+                id: Default::default(),
                 loc: span.into(),
                 blocks,
             }
@@ -648,14 +629,14 @@ fn expr_and(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     leading_ws(fold_consumed0(
         expr_or,
         preceded(ws_tag("&&"), cut(expr_or).map(Box::new)),
-        |lhs, (span, rhs)| Expr {
-            id: Default::default(),
-            kind: ExprKind::Binary(ExprBinary {
+        |lhs, (span, rhs)| {
+            Expr::Binary(ExprBinary {
+                id: Default::default(),
                 loc: span.into(),
                 lhs: Box::new(lhs),
                 op: BinOp::And,
                 rhs,
-            }),
+            })
         },
     ))(i)
 }
@@ -664,14 +645,14 @@ fn expr_or(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     leading_ws(fold_consumed0(
         expr_rel,
         preceded(ws_tag("||"), cut(expr_rel).map(Box::new)),
-        |lhs, (span, rhs)| Expr {
-            id: Default::default(),
-            kind: ExprKind::Binary(ExprBinary {
+        |lhs, (span, rhs)| {
+            Expr::Binary(ExprBinary {
+                id: Default::default(),
                 loc: span.into(),
                 lhs: Box::new(lhs),
                 op: BinOp::Or,
                 rhs,
-            }),
+            })
         },
     ))(i)
 }
@@ -698,15 +679,13 @@ fn expr_rel(i: Span<'_>) -> IResult<'_, Expr<'_>> {
         )),
         |(span, (lhs, rhs))| {
             if let Some((op, rhs)) = rhs {
-                Expr {
+                Expr::Binary(ExprBinary {
                     id: Default::default(),
-                    kind: ExprKind::Binary(ExprBinary {
-                        loc: span.into(),
-                        lhs: Box::new(lhs),
-                        op,
-                        rhs,
-                    }),
-                }
+                    loc: span.into(),
+                    lhs: Box::new(lhs),
+                    op,
+                    rhs,
+                })
             } else {
                 lhs
             }
@@ -725,14 +704,14 @@ fn expr_addsub(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     leading_ws(fold_consumed0(
         expr_unary,
         pair(addsub_op, cut(expr_unary).map(Box::new)),
-        |lhs, (span, (op, rhs))| Expr {
-            id: Default::default(),
-            kind: ExprKind::Binary(ExprBinary {
+        |lhs, (span, (op, rhs))| {
+            Expr::Binary(ExprBinary {
+                id: Default::default(),
                 loc: span.into(),
                 lhs: Box::new(lhs),
                 op,
                 rhs,
-            }),
+            })
         },
     ))(i)
 }
@@ -748,13 +727,13 @@ fn expr_unary(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     leading_ws(alt((
         map(
             consumed(pair(un_op, expr_unary.map(Box::new))),
-            |(span, (op, expr))| Expr {
-                id: Default::default(),
-                kind: ExprKind::Unary(ExprUnary {
+            |(span, (op, expr))| {
+                Expr::Unary(ExprUnary {
+                    id: Default::default(),
                     loc: span.into(),
                     op,
                     expr,
-                }),
+                })
             },
         ),
         expr_index,
@@ -765,13 +744,13 @@ fn expr_index(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     leading_ws(fold_consumed0(
         expr_atom,
         delimited(ws_tag("["), cut(expr).map(Box::new), cut(ws_tag("]"))),
-        |base, (span, index)| Expr {
-            id: Default::default(),
-            kind: ExprKind::Index(ExprIndex {
+        |base, (span, index)| {
+            Expr::Index(ExprIndex {
+                id: Default::default(),
                 loc: span.into(),
                 base: Box::new(base),
                 index,
-            }),
+            })
         },
     ))(i)
 }
@@ -779,26 +758,11 @@ fn expr_index(i: Span<'_>) -> IResult<'_, Expr<'_>> {
 fn expr_atom(i: Span<'_>) -> IResult<'_, Expr<'_>> {
     leading_ws(alt((
         delimited(tag("("), cut(expr), cut(ws_tag(")"))),
-        expr_array_repeat.map(|expr| Expr {
-            id: Default::default(),
-            kind: ExprKind::ArrayRepeat(expr),
-        }),
-        expr_int.map(|expr| Expr {
-            id: Default::default(),
-            kind: ExprKind::Int(expr),
-        }),
-        expr_bool.map(|expr| Expr {
-            id: Default::default(),
-            kind: ExprKind::Bool(expr),
-        }),
-        expr_func.map(|expr| Expr {
-            id: Default::default(),
-            kind: ExprKind::Func(expr),
-        }),
-        expr_path.map(|expr| Expr {
-            id: Default::default(),
-            kind: ExprKind::Path(expr),
-        }),
+        expr_array_repeat.map(Expr::ArrayRepeat),
+        expr_int.map(Expr::Int),
+        expr_bool.map(Expr::Bool),
+        expr_func.map(Expr::Func),
+        expr_path.map(Expr::Path),
     )))(i)
 }
 
@@ -814,6 +778,7 @@ fn expr_array_repeat(i: Span<'_>) -> IResult<'_, ExprArrayRepeat<'_>> {
             cut(ws_tag("]")),
         ))),
         |(span, (expr, len))| ExprArrayRepeat {
+            id: Default::default(),
             loc: span.into(),
             expr,
             len,
@@ -830,6 +795,7 @@ fn expr_int(i: Span<'_>) -> IResult<'_, ExprInt<'_>> {
             })))),
         )),
         |(span, value)| ExprInt {
+            id: Default::default(),
             loc: span.into(),
             value,
         },
@@ -843,6 +809,7 @@ fn expr_bool(i: Span<'_>) -> IResult<'_, ExprBool<'_>> {
             value(false, keyword(Keyword::False)),
         )))),
         |(span, value)| ExprBool {
+            id: Default::default(),
             loc: span.into(),
             value,
         },
@@ -869,6 +836,7 @@ fn expr_func(i: Span<'_>) -> IResult<'_, ExprFunc<'_>> {
             )),
         ))),
         |(span, (name, args))| ExprFunc {
+            id: Default::default(),
             loc: span.into(),
             name,
             args,
@@ -877,5 +845,8 @@ fn expr_func(i: Span<'_>) -> IResult<'_, ExprFunc<'_>> {
 }
 
 fn expr_path(i: Span<'_>) -> IResult<'_, ExprPath<'_>> {
-    map(path, |path| ExprPath { path })(i)
+    map(res_path, |path| ExprPath {
+        id: Default::default(),
+        path,
+    })(i)
 }

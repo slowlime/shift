@@ -18,12 +18,12 @@ pub trait StmtRecurse<'a> {
         'a: 'b;
 }
 
-pub trait ExprRecurse<'a> {
-    fn recurse<'b, V: ExprVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+pub trait Recurse<'a> {
+    fn recurse<'b, V: Visitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
     where
         'a: 'b;
 
-    fn recurse_mut<'b, V: ExprVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    fn recurse_mut<'b, V: VisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
     where
         'a: 'b;
 }
@@ -149,10 +149,10 @@ macro_rules! define_visitor {
 define_visitor! {
     use<'a, 'b>;
 
-    trait ExprVisitor;
-    trait ExprVisitorMut;
-    trait DefaultExprVisitor;
-    trait DefaultExprVisitorMut;
+    trait Visitor;
+    trait VisitorMut;
+    trait DefaultVisitor;
+    trait DefaultVisitorMut;
 
     rec {
         visit_expr(expr: super::Expr<'a>);
@@ -161,22 +161,30 @@ define_visitor! {
         visit_binary(expr: super::ExprBinary<'a>);
         visit_unary(expr: super::ExprUnary<'a>);
         visit_func(expr: super::ExprFunc<'a>);
+
+        visit_ty(ty: super::Ty<'a>);
+        visit_ty_range(ty: super::TyRange<'a>);
+        visit_ty_array(ty: super::TyArray<'a>);
     }
 
     leaf {
         visit_path(expr: super::ExprPath<'a>);
         visit_bool(expr: super::ExprBool<'a>);
         visit_int(expr: super::ExprInt<'a>);
+
+        visit_ty_int(ty: super::TyInt<'a>);
+        visit_ty_bool(ty: super::TyBool<'a>);
+        visit_ty_path(ty: super::TyPath<'a>);
     }
 }
 
 define_visitor! {
     use<'a, 'b>;
 
-    trait StmtVisitor: ExprVisitor<'a, 'b>;
-    trait StmtVisitorMut: ExprVisitorMut<'a, 'b>;
-    trait DefaultStmtVisitor: ExprVisitor<'a, 'b>;
-    trait DefaultStmtVisitorMut: ExprVisitorMut<'a, 'b>;
+    trait StmtVisitor: Visitor<'a, 'b>;
+    trait StmtVisitorMut: VisitorMut<'a, 'b>;
+    trait DefaultStmtVisitor: Visitor<'a, 'b>;
+    trait DefaultStmtVisitorMut: VisitorMut<'a, 'b>;
 
     rec {
         visit_stmt(stmt: super::Stmt<'a>);

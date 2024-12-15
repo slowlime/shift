@@ -3,7 +3,7 @@ use std::mem;
 use slotmap::Key;
 
 use crate::ast::visit::{
-    DefaultDeclVisitorMut, DefaultExprVisitorMut, DefaultStmtVisitorMut, ExprRecurse, StmtRecurse,
+    DefaultDeclVisitorMut, DefaultStmtVisitorMut, DefaultVisitorMut, Recurse, StmtRecurse,
 };
 use crate::ast::{Decl, Expr, HasLoc, Stmt};
 use crate::diag::DiagCtx;
@@ -89,20 +89,45 @@ where
     D: DiagCtx,
 {
     fn visit_stmt(&mut self, stmt: &'ast mut Stmt<'src>) {
-        stmt.id = self.pass.m.stmts.insert(StmtInfo {});
+        let stmt_id = self.pass.m.stmts.insert(StmtInfo {});
+
+        match stmt {
+            Stmt::Dummy => {}
+            Stmt::ConstFor(stmt) => stmt.id = stmt_id,
+            Stmt::Defaulting(stmt) => stmt.id = stmt_id,
+            Stmt::Alias(stmt) => stmt.id = stmt_id,
+            Stmt::If(stmt) => stmt.id = stmt_id,
+            Stmt::Match(stmt) => stmt.id = stmt_id,
+            Stmt::AssignNext(stmt) => stmt.id = stmt_id,
+            Stmt::Either(stmt) => stmt.id = stmt_id,
+        }
+
         stmt.recurse_mut(self);
     }
 }
 
-impl<'src, 'ast, D> DefaultExprVisitorMut<'src, 'ast> for Walker<'src, '_, '_, '_, D>
+impl<'src, 'ast, D> DefaultVisitorMut<'src, 'ast> for Walker<'src, '_, '_, '_, D>
 where
     'src: 'ast,
     D: DiagCtx,
 {
     fn visit_expr(&mut self, expr: &'ast mut Expr<'src>) {
-        expr.id = self.pass.m.exprs.insert(ExprInfo {
+        let expr_id = self.pass.m.exprs.insert(ExprInfo {
             ty: Default::default(),
         });
+
+        match expr {
+            Expr::Dummy => {}
+            Expr::Path(expr) => expr.id = expr_id,
+            Expr::Bool(expr) => expr.id = expr_id,
+            Expr::Int(expr) => expr.id = expr_id,
+            Expr::ArrayRepeat(expr) => expr.id = expr_id,
+            Expr::Index(expr) => expr.id = expr_id,
+            Expr::Binary(expr) => expr.id = expr_id,
+            Expr::Unary(expr) => expr.id = expr_id,
+            Expr::Func(expr) => expr.id = expr_id,
+        }
+
         expr.recurse_mut(self);
     }
 }

@@ -5,11 +5,11 @@ use std::fmt::{self, Display};
 use derive_more::derive::{Display, From};
 use nom_locate::LocatedSpan;
 use visit::{
-    DeclRecurse, DeclVisitor, DeclVisitorMut, ExprRecurse, ExprVisitor, ExprVisitorMut,
-    StmtRecurse, StmtVisitor, StmtVisitorMut,
+    DeclRecurse, DeclVisitor, DeclVisitorMut, Recurse, StmtRecurse, StmtVisitor, StmtVisitorMut,
+    Visitor, VisitorMut,
 };
 
-use crate::sema::{ExprId, StmtId, TyId};
+use crate::sema::{self, BindingId, ExprId, StmtId, TyId, TyNsId};
 
 pub type Span<'a> = LocatedSpan<&'a str>;
 
@@ -53,8 +53,79 @@ pub enum Decl<'a> {
     Trans(DeclTrans<'a>),
 }
 
+impl<'a> Decl<'a> {
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Dummy => "dummy decl",
+            Self::Const(_) => "const decl",
+            Self::Enum(_) => "enum decl",
+            Self::Var(_) => "var decl",
+            Self::Trans(_) => "trans decl",
+        }
+    }
+
+    pub fn as_const(&self) -> &DeclConst<'a> {
+        match self {
+            Self::Const(decl) => decl,
+            _ => panic!("called `as_const` on a {}", self.kind_name()),
+        }
+    }
+
+    pub fn as_const_mut(&mut self) -> &mut DeclConst<'a> {
+        match self {
+            Self::Const(decl) => decl,
+            _ => panic!("called `as_const_mut` on a {}", self.kind_name()),
+        }
+    }
+
+    pub fn as_enum(&self) -> &DeclEnum<'a> {
+        match self {
+            Self::Enum(decl) => decl,
+            _ => panic!("called `as_enum` on a {}", self.kind_name()),
+        }
+    }
+
+    pub fn as_enum_mut(&mut self) -> &mut DeclEnum<'a> {
+        match self {
+            Self::Enum(decl) => decl,
+            _ => panic!("called `as_enum_mut` on a {}", self.kind_name()),
+        }
+    }
+
+    pub fn as_var(&self) -> &DeclVar<'a> {
+        match self {
+            Self::Var(decl) => decl,
+            _ => panic!("called `as_var` on a {}", self.kind_name()),
+        }
+    }
+
+    pub fn as_var_mut(&mut self) -> &mut DeclVar<'a> {
+        match self {
+            Self::Var(decl) => decl,
+            _ => panic!("called `as_var_mut` on a {}", self.kind_name()),
+        }
+    }
+
+    pub fn as_trans(&self) -> &DeclTrans<'a> {
+        match self {
+            Self::Trans(decl) => decl,
+            _ => panic!("called `as_trans` on a {}", self.kind_name()),
+        }
+    }
+
+    pub fn as_trans_mut(&mut self) -> &mut DeclTrans<'a> {
+        match self {
+            Self::Trans(decl) => decl,
+            _ => panic!("called `as_trans_mut` on a {}", self.kind_name()),
+        }
+    }
+}
+
 impl<'a> DeclRecurse<'a> for Decl<'a> {
-    fn recurse<'b, V: DeclVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+    fn recurse<'b, V: DeclVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         match self {
             Self::Dummy => panic!("called `recurse` on `Decl::Dummy`"),
             Self::Const(decl) => visitor.visit_const(decl),
@@ -64,7 +135,10 @@ impl<'a> DeclRecurse<'a> for Decl<'a> {
         }
     }
 
-    fn recurse_mut<'b, V: DeclVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: DeclVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         match self {
             Self::Dummy => panic!("called `recurse_mut` on `Decl::Dummy`"),
             Self::Const(decl) => visitor.visit_const(decl),
@@ -92,25 +166,33 @@ pub struct DeclConst<'a> {
     pub loc: Loc<'a>,
     pub name: Name<'a>,
     pub value: Expr<'a>,
+    pub binding_id: BindingId,
 }
 
 impl<'a> DeclRecurse<'a> for DeclConst<'a> {
-    fn recurse<'b, V: DeclVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+    fn recurse<'b, V: DeclVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&self.value);
     }
 
-    fn recurse_mut<'b, V: DeclVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: DeclVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&mut self.value);
     }
 }
 
 impl<'a> HasLoc<'a> for DeclConst<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Display, Debug, Clone)]
+#[display("{name}")]
 pub struct Name<'a> {
     pub name: Span<'a>,
 }
@@ -126,17 +208,19 @@ pub struct DeclEnum<'a> {
     pub loc: Loc<'a>,
     pub name: Name<'a>,
     pub variants: Vec<Variant<'a>>,
+    pub ty_ns_id: TyNsId,
 }
 
 impl<'a> HasLoc<'a> for DeclEnum<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Variant<'a> {
     pub name: Name<'a>,
+    pub binding_id: BindingId,
 }
 
 impl<'a> HasLoc<'a> for Variant<'a> {
@@ -151,16 +235,23 @@ pub struct DeclVar<'a> {
     pub name: Name<'a>,
     pub ty: Ty<'a>,
     pub init: Option<Expr<'a>>,
+    pub binding_id: BindingId,
 }
 
 impl<'a> DeclRecurse<'a> for DeclVar<'a> {
-    fn recurse<'b, V: DeclVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+    fn recurse<'b, V: DeclVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         if let Some(init) = &self.init {
             visitor.visit_expr(init);
         }
     }
 
-    fn recurse_mut<'b, V: DeclVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: DeclVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         if let Some(init) = &mut self.init {
             visitor.visit_expr(init);
         }
@@ -169,7 +260,7 @@ impl<'a> DeclRecurse<'a> for DeclVar<'a> {
 
 impl<'a> HasLoc<'a> for DeclVar<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
@@ -180,35 +271,29 @@ pub struct DeclTrans<'a> {
 }
 
 impl<'a> DeclRecurse<'a> for DeclTrans<'a> {
-    fn recurse<'b, V: DeclVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+    fn recurse<'b, V: DeclVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         self.body.recurse(visitor);
     }
 
-    fn recurse_mut<'b, V: DeclVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: DeclVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         self.body.recurse_mut(visitor);
     }
 }
 
 impl<'a> HasLoc<'a> for DeclTrans<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct Ty<'a> {
-    pub id: TyId,
-    pub kind: TyKind<'a>,
-}
-
-impl<'a> HasLoc<'a> for Ty<'a> {
-    fn loc(&self) -> Loc<'a> {
-        self.kind.loc()
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-pub enum TyKind<'a> {
+pub enum Ty<'a> {
     #[default]
     Dummy,
     Int(TyInt<'a>),
@@ -218,10 +303,40 @@ pub enum TyKind<'a> {
     Path(TyPath<'a>),
 }
 
-impl<'a> HasLoc<'a> for TyKind<'a> {
+impl<'a> Recurse<'a> for Ty<'a> {
+    fn recurse<'b, V: Visitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
+        match self {
+            Self::Dummy => panic!("called `recurse` on `Ty::Dummy`"),
+            Self::Int(ty) => visitor.visit_ty_int(ty),
+            Self::Bool(ty) => visitor.visit_ty_bool(ty),
+            Self::Range(ty) => visitor.visit_ty_range(ty),
+            Self::Array(ty) => visitor.visit_ty_array(ty),
+            Self::Path(ty) => visitor.visit_ty_path(ty),
+        }
+    }
+
+    fn recurse_mut<'b, V: VisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
+        match self {
+            Self::Dummy => panic!("called `recurse_mut` on `Ty::Dummy`"),
+            Self::Int(ty) => visitor.visit_ty_int(ty),
+            Self::Bool(ty) => visitor.visit_ty_bool(ty),
+            Self::Range(ty) => visitor.visit_ty_range(ty),
+            Self::Array(ty) => visitor.visit_ty_array(ty),
+            Self::Path(ty) => visitor.visit_ty_path(ty),
+        }
+    }
+}
+
+impl<'a> HasLoc<'a> for Ty<'a> {
     fn loc(&self) -> Loc<'a> {
         match self {
-            Self::Dummy => panic!("called `pos` on `TyKind::Dummy`"),
+            Self::Dummy => panic!("called `pos` on `Ty::Dummy`"),
             Self::Int(ty) => ty.loc(),
             Self::Bool(ty) => ty.loc(),
             Self::Range(ty) => ty.loc(),
@@ -233,58 +348,111 @@ impl<'a> HasLoc<'a> for TyKind<'a> {
 
 #[derive(Debug, Clone)]
 pub struct TyInt<'a> {
+    pub ty_id: TyId,
     pub loc: Loc<'a>,
 }
 
 impl<'a> HasLoc<'a> for TyInt<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct TyBool<'a> {
+    pub ty_id: TyId,
     pub loc: Loc<'a>,
 }
 
 impl<'a> HasLoc<'a> for TyBool<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct TyRange<'a> {
+    pub ty_id: TyId,
     pub loc: Loc<'a>,
     pub lo: Expr<'a>,
     pub hi: Expr<'a>,
 }
 
+impl<'a> Recurse<'a> for TyRange<'a> {
+    fn recurse<'b, V: Visitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
+        visitor.visit_expr(&self.lo);
+        visitor.visit_expr(&self.hi);
+    }
+
+    fn recurse_mut<'b, V: VisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
+        visitor.visit_expr(&mut self.lo);
+        visitor.visit_expr(&mut self.hi);
+    }
+}
+
 impl<'a> HasLoc<'a> for TyRange<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct TyArray<'a> {
+    pub ty_id: TyId,
     pub loc: Loc<'a>,
     pub elem: Box<Ty<'a>>,
     pub len: Expr<'a>,
 }
 
+impl<'a> Recurse<'a> for TyArray<'a> {
+    fn recurse<'b, V: Visitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
+        visitor.visit_ty(&self.elem);
+        visitor.visit_expr(&self.len);
+    }
+
+    fn recurse_mut<'b, V: VisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
+        visitor.visit_ty(&mut self.elem);
+        visitor.visit_expr(&mut self.len);
+    }
+}
+
 impl<'a> HasLoc<'a> for TyArray<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct TyPath<'a> {
-    pub path: Path<'a>,
+    pub ty_id: TyId,
+    pub path: ResPath<'a>,
 }
 
 impl<'a> HasLoc<'a> for TyPath<'a> {
+    fn loc(&self) -> Loc<'a> {
+        self.path.loc()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResPath<'a> {
+    pub path: Path<'a>,
+    pub res: Option<sema::Res>,
+}
+
+impl<'a> HasLoc<'a> for ResPath<'a> {
     fn loc(&self) -> Loc<'a> {
         self.path.loc()
     }
@@ -297,9 +465,44 @@ pub struct Path<'a> {
     pub segments: Vec<Name<'a>>,
 }
 
+impl Display for Path<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.display_first(self.segments.len()).fmt(f)
+    }
+}
+
+impl Path<'_> {
+    pub fn display_first(&self, n: usize) -> impl Display + '_ {
+        struct Fmt<'a> {
+            path: &'a Path<'a>,
+            n: usize,
+        }
+
+        impl Display for Fmt<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                if self.path.absolute {
+                    write!(f, "::")?;
+                }
+
+                for (idx, segment) in self.path.segments.iter().enumerate().take(self.n) {
+                    if idx > 0 {
+                        write!(f, "::")?;
+                    }
+
+                    write!(f, "{segment}")?;
+                }
+
+                Ok(())
+            }
+        }
+
+        Fmt { path: self, n }
+    }
+}
+
 impl<'a> HasLoc<'a> for Path<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
@@ -310,13 +513,19 @@ pub struct Block<'a> {
 }
 
 impl<'a> StmtRecurse<'a> for Block<'a> {
-    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         for stmt in &self.stmts {
             visitor.visit_stmt(stmt);
         }
     }
 
-    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         for stmt in &mut self.stmts {
             visitor.visit_stmt(stmt);
         }
@@ -325,34 +534,12 @@ impl<'a> StmtRecurse<'a> for Block<'a> {
 
 impl<'a> HasLoc<'a> for Block<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct Stmt<'a> {
-    pub id: StmtId,
-    pub kind: StmtKind<'a>,
-}
-
-impl<'a> StmtRecurse<'a> for Stmt<'a> {
-    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
-        self.kind.recurse(visitor);
-    }
-
-    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
-        self.kind.recurse_mut(visitor);
-    }
-}
-
-impl<'a> HasLoc<'a> for Stmt<'a> {
-    fn loc(&self) -> Loc<'a> {
-        self.kind.loc()
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-pub enum StmtKind<'a> {
+pub enum Stmt<'a> {
     #[default]
     Dummy,
     ConstFor(StmtConstFor<'a>),
@@ -364,10 +551,13 @@ pub enum StmtKind<'a> {
     Either(StmtEither<'a>),
 }
 
-impl<'a> StmtRecurse<'a> for StmtKind<'a> {
-    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+impl<'a> StmtRecurse<'a> for Stmt<'a> {
+    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         match self {
-            Self::Dummy => panic!("called `recurse` on `StmtKind::Dummy`"),
+            Self::Dummy => panic!("called `recurse` on `Stmt::Dummy`"),
             Self::ConstFor(stmt) => visitor.visit_const_for(stmt),
             Self::Defaulting(stmt) => visitor.visit_defaulting(stmt),
             Self::Alias(stmt) => visitor.visit_alias(stmt),
@@ -378,9 +568,12 @@ impl<'a> StmtRecurse<'a> for StmtKind<'a> {
         }
     }
 
-    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         match self {
-            Self::Dummy => panic!("called `recurse_mut` on `StmtKind::Dummy`"),
+            Self::Dummy => panic!("called `recurse_mut` on `Stmt::Dummy`"),
             Self::ConstFor(stmt) => visitor.visit_const_for(stmt),
             Self::Defaulting(stmt) => visitor.visit_defaulting(stmt),
             Self::Alias(stmt) => visitor.visit_alias(stmt),
@@ -392,10 +585,10 @@ impl<'a> StmtRecurse<'a> for StmtKind<'a> {
     }
 }
 
-impl<'a> HasLoc<'a> for StmtKind<'a> {
+impl<'a> HasLoc<'a> for Stmt<'a> {
     fn loc(&self) -> Loc<'a> {
         match self {
-            Self::Dummy => panic!("called `pos` on `StmtKind::Dummy`"),
+            Self::Dummy => panic!("called `pos` on `Stmt::Dummy`"),
             Self::ConstFor(stmt) => stmt.loc(),
             Self::Defaulting(stmt) => stmt.loc(),
             Self::Alias(stmt) => stmt.loc(),
@@ -409,21 +602,29 @@ impl<'a> HasLoc<'a> for StmtKind<'a> {
 
 #[derive(Debug, Clone)]
 pub struct StmtConstFor<'a> {
+    pub id: StmtId,
     pub loc: Loc<'a>,
     pub var: Name<'a>,
     pub lo: Expr<'a>,
     pub hi: Expr<'a>,
     pub body: Block<'a>,
+    pub binding_id: BindingId,
 }
 
 impl<'a> StmtRecurse<'a> for StmtConstFor<'a> {
-    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&self.lo);
         visitor.visit_expr(&self.hi);
         self.body.recurse(visitor);
     }
 
-    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&mut self.lo);
         visitor.visit_expr(&mut self.hi);
         self.body.recurse_mut(visitor);
@@ -432,19 +633,23 @@ impl<'a> StmtRecurse<'a> for StmtConstFor<'a> {
 
 impl<'a> HasLoc<'a> for StmtConstFor<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtDefaulting<'a> {
+    pub id: StmtId,
     pub loc: Loc<'a>,
     pub vars: Vec<DefaultingVar<'a>>,
     pub body: Block<'a>,
 }
 
 impl<'a> StmtRecurse<'a> for StmtDefaulting<'a> {
-    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         for var in &self.vars {
             var.recurse(visitor);
         }
@@ -452,7 +657,10 @@ impl<'a> StmtRecurse<'a> for StmtDefaulting<'a> {
         self.body.recurse(visitor);
     }
 
-    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         for var in &mut self.vars {
             var.recurse_mut(visitor);
         }
@@ -463,25 +671,31 @@ impl<'a> StmtRecurse<'a> for StmtDefaulting<'a> {
 
 impl<'a> HasLoc<'a> for StmtDefaulting<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum DefaultingVar<'a> {
-    Var( Name<'a> ),
+    Var(Path<'a>),
     Alias(Stmt<'a>),
 }
 
 impl<'a> StmtRecurse<'a> for DefaultingVar<'a> {
-    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         match self {
             Self::Var(_) => {}
             Self::Alias(stmt) => visitor.visit_stmt(stmt),
         }
     }
 
-    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         match self {
             Self::Var(_) => {}
             Self::Alias(stmt) => visitor.visit_stmt(stmt),
@@ -500,29 +714,38 @@ impl<'a> HasLoc<'a> for DefaultingVar<'a> {
 
 #[derive(Debug, Clone)]
 pub struct StmtAlias<'a> {
+    pub id: StmtId,
     pub loc: Loc<'a>,
     pub name: Name<'a>,
     pub expr: Expr<'a>,
+    pub binding_id: BindingId,
 }
 
 impl<'a> StmtRecurse<'a> for StmtAlias<'a> {
-    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&self.expr);
     }
 
-    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&mut self.expr);
     }
 }
 
 impl<'a> HasLoc<'a> for StmtAlias<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtIf<'a> {
+    pub id: StmtId,
     pub loc: Loc<'a>,
     pub cond: Expr<'a>,
     pub is_unless: bool,
@@ -531,7 +754,10 @@ pub struct StmtIf<'a> {
 }
 
 impl<'a> StmtRecurse<'a> for StmtIf<'a> {
-    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&self.cond);
         self.then_branch.recurse(visitor);
 
@@ -540,7 +766,10 @@ impl<'a> StmtRecurse<'a> for StmtIf<'a> {
         }
     }
 
-    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&mut self.cond);
         self.then_branch.recurse_mut(visitor);
 
@@ -552,7 +781,7 @@ impl<'a> StmtRecurse<'a> for StmtIf<'a> {
 
 impl<'a> HasLoc<'a> for StmtIf<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
@@ -563,14 +792,20 @@ pub enum Else<'a> {
 }
 
 impl<'a> StmtRecurse<'a> for Else<'a> {
-    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         match self {
             Self::If(stmt) => visitor.visit_stmt(stmt),
             Self::Block(block) => block.recurse(visitor),
         }
     }
 
-    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         match self {
             Self::If(stmt) => visitor.visit_stmt(stmt),
             Self::Block(block) => block.recurse_mut(visitor),
@@ -589,13 +824,17 @@ impl<'a> HasLoc<'a> for Else<'a> {
 
 #[derive(Debug, Clone)]
 pub struct StmtMatch<'a> {
+    pub id: StmtId,
     pub loc: Loc<'a>,
     pub scrutinee: Expr<'a>,
     pub arms: Vec<Arm<'a>>,
 }
 
 impl<'a> StmtRecurse<'a> for StmtMatch<'a> {
-    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&self.scrutinee);
 
         for arm in &self.arms {
@@ -603,7 +842,10 @@ impl<'a> StmtRecurse<'a> for StmtMatch<'a> {
         }
     }
 
-    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&mut self.scrutinee);
 
         for arm in &mut self.arms {
@@ -614,7 +856,7 @@ impl<'a> StmtRecurse<'a> for StmtMatch<'a> {
 
 impl<'a> HasLoc<'a> for StmtMatch<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
@@ -626,12 +868,18 @@ pub struct Arm<'a> {
 }
 
 impl<'a> StmtRecurse<'a> for Arm<'a> {
-    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&self.expr);
         self.body.recurse(visitor);
     }
 
-    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&mut self.expr);
         self.body.recurse_mut(visitor);
     }
@@ -639,47 +887,61 @@ impl<'a> StmtRecurse<'a> for Arm<'a> {
 
 impl<'a> HasLoc<'a> for Arm<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtAssignNext<'a> {
+    pub id: StmtId,
     pub loc: Loc<'a>,
-    pub name: Name<'a>,
+    pub path: ResPath<'a>,
     pub expr: Expr<'a>,
 }
 
 impl<'a> StmtRecurse<'a> for StmtAssignNext<'a> {
-    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&self.expr);
     }
 
-    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&mut self.expr);
     }
 }
 
 impl<'a> HasLoc<'a> for StmtAssignNext<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtEither<'a> {
+    pub id: StmtId,
     pub loc: Loc<'a>,
     pub blocks: Vec<Block<'a>>,
 }
 
 impl<'a> StmtRecurse<'a> for StmtEither<'a> {
-    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+    fn recurse<'b, V: StmtVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         for block in &self.blocks {
             block.recurse(visitor);
         }
     }
 
-    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         for block in &mut self.blocks {
             block.recurse_mut(visitor);
         }
@@ -688,34 +950,12 @@ impl<'a> StmtRecurse<'a> for StmtEither<'a> {
 
 impl<'a> HasLoc<'a> for StmtEither<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct Expr<'a> {
-    pub id: ExprId,
-    pub kind: ExprKind<'a>,
-}
-
-impl<'a> ExprRecurse<'a> for Expr<'a> {
-    fn recurse<'b, V: ExprVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
-        self.kind.recurse(visitor);
-    }
-
-    fn recurse_mut<'b, V: ExprVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
-        self.kind.recurse_mut(visitor);
-    }
-}
-
-impl<'a> HasLoc<'a> for Expr<'a> {
-    fn loc(&self) -> Loc<'a> {
-        self.kind.loc()
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-pub enum ExprKind<'a> {
+pub enum Expr<'a> {
     #[default]
     Dummy,
     Path(ExprPath<'a>),
@@ -728,10 +968,13 @@ pub enum ExprKind<'a> {
     Func(ExprFunc<'a>),
 }
 
-impl<'a> ExprRecurse<'a> for ExprKind<'a> {
-    fn recurse<'b, V: ExprVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+impl<'a> Recurse<'a> for Expr<'a> {
+    fn recurse<'b, V: Visitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         match self {
-            Self::Dummy => panic!("called `recurse` on `ExprKind::Dummy`"),
+            Self::Dummy => panic!("called `recurse` on `Expr::Dummy`"),
             Self::Path(expr) => visitor.visit_path(expr),
             Self::Bool(expr) => visitor.visit_bool(expr),
             Self::Int(expr) => visitor.visit_int(expr),
@@ -743,9 +986,12 @@ impl<'a> ExprRecurse<'a> for ExprKind<'a> {
         }
     }
 
-    fn recurse_mut<'b, V: ExprVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: VisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         match self {
-            Self::Dummy => panic!("called `recurse_mut` on `ExprKind::Dummy`"),
+            Self::Dummy => panic!("called `recurse_mut` on `Expr::Dummy`"),
             Self::Path(expr) => visitor.visit_path(expr),
             Self::Bool(expr) => visitor.visit_bool(expr),
             Self::Int(expr) => visitor.visit_int(expr),
@@ -758,10 +1004,10 @@ impl<'a> ExprRecurse<'a> for ExprKind<'a> {
     }
 }
 
-impl<'a> HasLoc<'a> for ExprKind<'a> {
+impl<'a> HasLoc<'a> for Expr<'a> {
     fn loc(&self) -> Loc<'a> {
         match self {
-            Self::Dummy => panic!("called `pos` on `ExprKind::Dummy`"),
+            Self::Dummy => panic!("called `pos` on `Expr::Dummy`"),
             Self::Path(expr) => expr.loc(),
             Self::Bool(expr) => expr.loc(),
             Self::Int(expr) => expr.loc(),
@@ -776,7 +1022,8 @@ impl<'a> HasLoc<'a> for ExprKind<'a> {
 
 #[derive(Debug, Clone)]
 pub struct ExprPath<'a> {
-    pub path: Path<'a>,
+    pub id: ExprId,
+    pub path: ResPath<'a>,
 }
 
 impl<'a> HasLoc<'a> for ExprPath<'a> {
@@ -787,42 +1034,51 @@ impl<'a> HasLoc<'a> for ExprPath<'a> {
 
 #[derive(Debug, Clone)]
 pub struct ExprBool<'a> {
+    pub id: ExprId,
     pub loc: Loc<'a>,
     pub value: bool,
 }
 
 impl<'a> HasLoc<'a> for ExprBool<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ExprInt<'a> {
+    pub id: ExprId,
     pub loc: Loc<'a>,
     pub value: i64,
 }
 
 impl<'a> HasLoc<'a> for ExprInt<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ExprArrayRepeat<'a> {
+    pub id: ExprId,
     pub loc: Loc<'a>,
     pub expr: Box<Expr<'a>>,
     pub len: Box<Expr<'a>>,
 }
 
-impl<'a> ExprRecurse<'a> for ExprArrayRepeat<'a> {
-    fn recurse<'b, V: ExprVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+impl<'a> Recurse<'a> for ExprArrayRepeat<'a> {
+    fn recurse<'b, V: Visitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&self.expr);
         visitor.visit_expr(&self.len);
     }
 
-    fn recurse_mut<'b, V: ExprVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: VisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&mut self.expr);
         visitor.visit_expr(&mut self.len);
     }
@@ -830,24 +1086,31 @@ impl<'a> ExprRecurse<'a> for ExprArrayRepeat<'a> {
 
 impl<'a> HasLoc<'a> for ExprArrayRepeat<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ExprIndex<'a> {
+    pub id: ExprId,
     pub loc: Loc<'a>,
     pub base: Box<Expr<'a>>,
     pub index: Box<Expr<'a>>,
 }
 
-impl<'a> ExprRecurse<'a> for ExprIndex<'a> {
-    fn recurse<'b, V: ExprVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+impl<'a> Recurse<'a> for ExprIndex<'a> {
+    fn recurse<'b, V: Visitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&self.base);
         visitor.visit_expr(&self.index);
     }
 
-    fn recurse_mut<'b, V: ExprVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: VisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&mut self.base);
         visitor.visit_expr(&mut self.index);
     }
@@ -855,25 +1118,32 @@ impl<'a> ExprRecurse<'a> for ExprIndex<'a> {
 
 impl<'a> HasLoc<'a> for ExprIndex<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ExprBinary<'a> {
+    pub id: ExprId,
     pub loc: Loc<'a>,
     pub lhs: Box<Expr<'a>>,
     pub op: BinOp,
     pub rhs: Box<Expr<'a>>,
 }
 
-impl<'a> ExprRecurse<'a> for ExprBinary<'a> {
-    fn recurse<'b, V: ExprVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+impl<'a> Recurse<'a> for ExprBinary<'a> {
+    fn recurse<'b, V: Visitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&self.lhs);
         visitor.visit_expr(&self.rhs);
     }
 
-    fn recurse_mut<'b, V: ExprVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: VisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&mut self.lhs);
         visitor.visit_expr(&mut self.rhs);
     }
@@ -881,7 +1151,7 @@ impl<'a> ExprRecurse<'a> for ExprBinary<'a> {
 
 impl<'a> HasLoc<'a> for ExprBinary<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
@@ -903,24 +1173,31 @@ pub enum BinOp {
 
 #[derive(Debug, Clone)]
 pub struct ExprUnary<'a> {
+    pub id: ExprId,
     pub loc: Loc<'a>,
     pub op: UnOp,
     pub expr: Box<Expr<'a>>,
 }
 
-impl<'a> ExprRecurse<'a> for ExprUnary<'a> {
-    fn recurse<'b, V: ExprVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+impl<'a> Recurse<'a> for ExprUnary<'a> {
+    fn recurse<'b, V: Visitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&self.expr);
     }
 
-    fn recurse_mut<'b, V: ExprVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: VisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         visitor.visit_expr(&mut self.expr);
     }
 }
 
 impl<'a> HasLoc<'a> for ExprUnary<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }
 
@@ -932,19 +1209,26 @@ pub enum UnOp {
 
 #[derive(Debug, Clone)]
 pub struct ExprFunc<'a> {
+    pub id: ExprId,
     pub loc: Loc<'a>,
     pub name: Name<'a>,
     pub args: Vec<Expr<'a>>,
 }
 
-impl<'a> ExprRecurse<'a> for ExprFunc<'a> {
-    fn recurse<'b, V: ExprVisitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V) {
+impl<'a> Recurse<'a> for ExprFunc<'a> {
+    fn recurse<'b, V: Visitor<'a, 'b> + ?Sized>(&'b self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         for arg in &self.args {
             visitor.visit_expr(arg);
         }
     }
 
-    fn recurse_mut<'b, V: ExprVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V) {
+    fn recurse_mut<'b, V: VisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
+    where
+        'a: 'b,
+    {
         for arg in &mut self.args {
             visitor.visit_expr(arg);
         }
@@ -953,6 +1237,6 @@ impl<'a> ExprRecurse<'a> for ExprFunc<'a> {
 
 impl<'a> HasLoc<'a> for ExprFunc<'a> {
     fn loc(&self) -> Loc<'a> {
-        self.loc.into()
+        self.loc
     }
 }

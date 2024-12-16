@@ -1272,6 +1272,7 @@ pub struct ExprFunc<'a> {
     pub id: ExprId,
     pub loc: Loc<'a>,
     pub name: Name<'a>,
+    pub builtin: Builtin,
     pub args: Vec<Expr<'a>>,
 }
 
@@ -1298,5 +1299,20 @@ impl<'a> Recurse<'a> for ExprFunc<'a> {
 impl<'a> HasLoc<'a> for ExprFunc<'a> {
     fn loc(&self) -> Loc<'a> {
         self.loc
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Builtin {
+    Min,
+    Max,
+}
+
+impl Builtin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Min => "min",
+            Self::Max => "max",
+        }
     }
 }

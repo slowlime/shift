@@ -1,7 +1,9 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::error::Error;
 use std::ops::RangeTo;
 use std::sync::LazyLock;
 
+use derive_more::derive::Display;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take};
 use nom::character::complete::{alpha1, alphanumeric1, digit1, line_ending, multispace0, space0};
@@ -16,10 +18,10 @@ use nom_supreme::error::ErrorTree;
 use nom_supreme::final_parser::final_parser;
 
 use crate::ast::{
-    Arm, BinOp, Block, Decl, DeclConst, DeclEnum, DeclTrans, DeclVar, DefaultingVar, Else, Expr,
-    ExprArrayRepeat, ExprBinary, ExprBool, ExprFunc, ExprIndex, ExprInt, ExprPath, ExprUnary, Name,
-    Path, ResPath, Span, Stmt, StmtAlias, StmtAssignNext, StmtConstFor, StmtDefaulting, StmtEither,
-    StmtIf, StmtMatch, Ty, TyArray, TyBool, TyInt, TyPath, TyRange, UnOp, Variant,
+    Arm, BinOp, Block, Builtin, Decl, DeclConst, DeclEnum, DeclTrans, DeclVar, DefaultingVar, Else,
+    Expr, ExprArrayRepeat, ExprBinary, ExprBool, ExprFunc, ExprIndex, ExprInt, ExprPath, ExprUnary,
+    Name, Path, ResPath, Span, Stmt, StmtAlias, StmtAssignNext, StmtConstFor, StmtDefaulting,
+    StmtEither, StmtIf, StmtMatch, Ty, TyArray, TyBool, TyInt, TyPath, TyRange, UnOp, Variant,
 };
 
 type IResult<'a, T, E = ErrorTree<Span<'a>>> = nom::IResult<Span<'a>, T, E>;
@@ -816,12 +818,22 @@ fn expr_bool(i: Span<'_>) -> IResult<'_, ExprBool<'_>> {
     )(i)
 }
 
-static BUILTIN_NAMES: LazyLock<HashSet<&'static str>> =
-    LazyLock::new(|| HashSet::from_iter(["max", "min"]));
+static BUILTIN_NAMES: LazyLock<HashMap<&'static str, Builtin>> =
+    LazyLock::new(|| HashMap::from_iter([("max", Builtin::Min), ("min", Builtin::Max)]));
 
-fn builtin_func_name(i: Span<'_>) -> IResult<'_, Name<'_>> {
-    verify(name, |s: &Name<'_>| {
-        BUILTIN_NAMES.contains(s.name.fragment())
+#[derive(Display, Debug, Clone)]
+#[display("unrecognized built-in function name `{_0}`")]
+struct UnrecognizedBuiltinName(String);
+
+impl Error for UnrecognizedBuiltinName {}
+
+fn builtin_func_name(i: Span<'_>) -> IResult<'_, (Builtin, Name<'_>)> {
+    map_res(name, |name: Name<'_>| {
+        BUILTIN_NAMES
+            .get(name.name.fragment())
+            .copied()
+            .ok_or_else(|| UnrecognizedBuiltinName(name.to_string()))
+            .map(|builtin| (builtin, name))
     })(i)
 }
 
@@ -835,10 +847,11 @@ fn expr_func(i: Span<'_>) -> IResult<'_, ExprFunc<'_>> {
                 ws_tag(")"),
             )),
         ))),
-        |(span, (name, args))| ExprFunc {
+        |(span, ((builtin, name), args))| ExprFunc {
             id: Default::default(),
             loc: span.into(),
             name,
+            builtin,
             args,
         },
     )(i)

@@ -1,11 +1,13 @@
+use std::cmp::Ordering;
 use std::mem;
 
 use slotmap::{Key, SparseSecondaryMap};
 
 use crate::ast::{
-    Block, Decl, DeclConst, DeclEnum, DeclTrans, DeclVar, DefaultingVar, Else, Expr, HasLoc, Loc,
-    Stmt, StmtAlias, StmtAssignNext, StmtConstFor, StmtDefaulting, StmtEither, StmtIf, StmtMatch,
-    Ty, TyArray, TyBool, TyInt, TyPath, TyRange,
+    BinOp, Block, Builtin, Decl, DeclConst, DeclEnum, DeclTrans, DeclVar, DefaultingVar, Else,
+    Expr, ExprArrayRepeat, ExprBinary, ExprBool, ExprFunc, ExprIndex, ExprInt, ExprPath, ExprUnary,
+    HasLoc, Loc, Stmt, StmtAlias, StmtAssignNext, StmtConstFor, StmtDefaulting, StmtEither, StmtIf,
+    StmtMatch, Ty, TyArray, TyBool, TyInt, TyPath, TyRange, UnOp,
 };
 use crate::diag::DiagCtx;
 
@@ -146,6 +148,18 @@ impl<'src, 'm, 'd, 'dep, D: DiagCtx> Pass<'src, 'm, 'd, 'dep, D> {
             self.emit_ty_mismatch(loc, expected_ty_id, actual_ty_id);
 
             Err(())
+        }
+    }
+
+    fn check_eq_comparable(&mut self, loc: Loc<'src>, ty_id: TyId) -> Result {
+        todo!()
+    }
+
+    fn ty_join(&self, lhs_ty_id: TyId, rhs_ty_id: TyId) -> Option<TyId> {
+        match (&self.m.ty_defs[lhs_ty_id], &self.m.ty_defs[rhs_ty_id]) {
+            _ if lhs_ty_id == rhs_ty_id => Some(lhs_ty_id),
+            (TyDef::Error, _) | (_, TyDef::Error) => Some(self.m.primitive_tys.error),
+            _ => None,
         }
     }
 }
@@ -429,7 +443,230 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
     }
 
     fn typeck_expr(&mut self, expr: &mut Expr<'src>) -> Result {
-        todo!()
+        match expr {
+            Expr::Dummy => panic!("encountered a dummy expression"),
+            Expr::Path(expr) => self.typeck_expr_path(expr),
+            Expr::Bool(expr) => self.typeck_expr_bool(expr),
+            Expr::Int(expr) => self.typeck_expr_int(expr),
+            Expr::ArrayRepeat(expr) => self.typeck_expr_array_repeat(expr),
+            Expr::Index(expr) => self.typeck_expr_index(expr),
+            Expr::Binary(expr) => self.typeck_expr_binary(expr),
+            Expr::Unary(expr) => self.typeck_expr_unary(expr),
+            Expr::Func(expr) => self.typeck_expr_func(expr),
+        }
+    }
+
+    fn typeck_expr_path(&mut self, expr: &mut ExprPath<'src>) -> Result {
+        let binding = &self.m.bindings[expr.path.res.unwrap().into_binding_id()];
+        self.m.exprs[expr.id].ty_id = binding.ty_id;
+
+        Ok(())
+    }
+
+    fn typeck_expr_bool(&mut self, expr: &mut ExprBool<'src>) -> Result {
+        self.m.exprs[expr.id].ty_id = self.m.primitive_tys.bool;
+
+        Ok(())
+    }
+
+    fn typeck_expr_int(&mut self, expr: &mut ExprInt<'src>) -> Result {
+        self.m.exprs[expr.id].ty_id = self.m.primitive_tys.int;
+
+        Ok(())
+    }
+
+    fn typeck_expr_array_repeat(&mut self, expr: &mut ExprArrayRepeat<'src>) -> Result {
+        self.m.exprs[expr.id].ty_id = self.m.primitive_tys.error;
+        let mut result = self.typeck_expr(&mut expr.expr);
+        result = result.and(self.typeck_expr(&mut expr.len));
+        let elem_ty_id = self.m.exprs[expr.len.id()].ty_id;
+        result = result.and(self.check_ty(expr.len.loc(), self.m.primitive_tys.int, elem_ty_id));
+        result?;
+
+        self.const_eval(&mut expr.len)?;
+        let len = self.m.exprs[expr.len.id()]
+            .value
+            .as_ref()
+            .ok_or(())?
+            .to_int();
+        let len = match usize::try_from(len) {
+            Ok(len) => len,
+            Err(e) => {
+                self.diag
+                    .err_at(expr.len.loc(), format!("invalid array length: {e}"));
+                return Err(());
+            }
+        };
+
+        self.m.exprs[expr.id].ty_id = self.add_ty(TyDef::Array(elem_ty_id, len));
+
+        Ok(())
+    }
+
+    fn typeck_expr_index(&mut self, expr: &mut ExprIndex<'src>) -> Result {
+        self.m.exprs[expr.id].ty_id = self.m.primitive_tys.error;
+        let base_result = self.typeck_expr(&mut expr.base);
+        let index_result = self.typeck_expr(&mut expr.index);
+        let base_ty_id = self.m.exprs[expr.base.id()].ty_id;
+
+        let base_result = base_result.and_then(|_| match self.m.ty_defs[base_ty_id] {
+            TyDef::Array(elem_ty_id, _) => {
+                self.m.exprs[expr.id].ty_id = elem_ty_id;
+
+                Ok(())
+            }
+
+            TyDef::Error => Ok(()),
+
+            _ => {
+                self.diag.err_at(
+                    expr.base.loc(),
+                    format!(
+                        "cannot index into `{}`, expected an array type",
+                        self.m.display_ty(base_ty_id),
+                    ),
+                );
+
+                Err(())
+            }
+        });
+
+        base_result.and(index_result)
+    }
+
+    fn typeck_expr_binary(&mut self, expr: &mut ExprBinary<'src>) -> Result {
+        self.m.exprs[expr.id].ty_id = self.m.primitive_tys.error;
+        let mut result = self.typeck_expr(&mut expr.lhs);
+        result = result.and(self.typeck_expr(&mut expr.rhs));
+
+        let lhs_ty_id = self.m.exprs[expr.lhs.id()].ty_id;
+        let rhs_ty_id = self.m.exprs[expr.rhs.id()].ty_id;
+
+        match expr.op {
+            BinOp::Add | BinOp::Sub | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                result =
+                    result.and(self.check_ty(expr.lhs.loc(), self.m.primitive_tys.int, lhs_ty_id));
+                result =
+                    result.and(self.check_ty(expr.rhs.loc(), self.m.primitive_tys.int, rhs_ty_id));
+                self.m.exprs[expr.id].ty_id = self.m.primitive_tys.int;
+            }
+
+            BinOp::And | BinOp::Or => {
+                result =
+                    result.and(self.check_ty(expr.lhs.loc(), self.m.primitive_tys.bool, lhs_ty_id));
+                result =
+                    result.and(self.check_ty(expr.rhs.loc(), self.m.primitive_tys.bool, rhs_ty_id));
+                self.m.exprs[expr.id].ty_id = self.m.primitive_tys.bool;
+            }
+
+            BinOp::Eq | BinOp::Ne => {
+                result = result.and(self.check_eq_comparable(expr.lhs.loc(), lhs_ty_id));
+                result = result.and(self.check_eq_comparable(expr.rhs.loc(), rhs_ty_id));
+
+                let tys_allowed = self
+                    .ty_join(lhs_ty_id, rhs_ty_id)
+                    .map(|ty_id| {
+                        self.ty_conforms_to(lhs_ty_id, ty_id)
+                            && self.ty_conforms_to(rhs_ty_id, ty_id)
+                    })
+                    .unwrap_or(false);
+
+                if !tys_allowed {
+                    self.diag.err_at(
+                        expr.loc,
+                        format!(
+                            "cannot compare operands of types `{}` and `{}` for equality",
+                            self.m.display_ty(lhs_ty_id),
+                            self.m.display_ty(rhs_ty_id),
+                        ),
+                    );
+                    result = Err(());
+                }
+
+                self.m.exprs[expr.id].ty_id = self.m.primitive_tys.bool;
+            }
+        }
+
+        result
+    }
+
+    fn typeck_expr_unary(&mut self, expr: &mut ExprUnary<'src>) -> Result {
+        let mut result = self.typeck_expr(&mut expr.expr);
+        let operand_ty_id = self.m.exprs[expr.expr.id()].ty_id;
+
+        match expr.op {
+            UnOp::Neg => {
+                result = result.and(self.check_ty(
+                    expr.expr.loc(),
+                    self.m.primitive_tys.int,
+                    operand_ty_id,
+                ));
+                self.m.exprs[expr.id].ty_id = self.m.primitive_tys.int;
+            }
+
+            UnOp::Not => {
+                result = result.and(self.check_ty(
+                    expr.expr.loc(),
+                    self.m.primitive_tys.bool,
+                    operand_ty_id,
+                ));
+                self.m.exprs[expr.id].ty_id = self.m.primitive_tys.bool;
+            }
+        }
+
+        result
+    }
+
+    fn typeck_expr_func(&mut self, expr: &mut ExprFunc<'src>) -> Result {
+        #[allow(clippy::manual_try_fold, reason = "short-circuiting is undesirable")]
+        let mut result = expr
+            .args
+            .iter_mut()
+            .fold(Ok(()), |r, arg| r.and(self.typeck_expr(arg)));
+
+        let expected_arg_tys = match expr.builtin {
+            Builtin::Min | Builtin::Max => &[self.m.primitive_tys.int, self.m.primitive_tys.int],
+        };
+
+        let expected_arg_count = expected_arg_tys.len();
+        let actual_arg_count = expr.args.len();
+
+        match actual_arg_count.cmp(&expected_arg_count) {
+            Ordering::Less => {
+                self.diag.err_at(
+                    expr.loc(),
+                    format!(
+                        "too few arguments: expected {expected_arg_count}, got {actual_arg_count}"
+                    ),
+                );
+                result = Err(());
+            }
+
+            Ordering::Equal => {
+                for (expected_arg_ty, arg) in expected_arg_tys.iter().copied().zip(&expr.args) {
+                    let actual_arg_ty = self.m.exprs[arg.id()].ty_id;
+                    result = result.and(self.check_ty(arg.loc(), expected_arg_ty, actual_arg_ty));
+                }
+            }
+
+            Ordering::Greater => {
+                self.diag.err_at(
+                    expr.loc(),
+                    format!(
+                        "too many arguments: expected {expected_arg_count}, got {actual_arg_count}"
+                    ),
+                );
+                result = Err(());
+            }
+        }
+
+        match expr.builtin {
+            Builtin::Min | Builtin::Max => {
+                self.m.exprs[expr.id].ty_id = self.m.primitive_tys.int;
+            }
+        }
+
+        result
     }
 
     fn typeck_binding(&mut self, loc: Loc<'src>, binding_id: BindingId, ty_id: TyId) -> Result {

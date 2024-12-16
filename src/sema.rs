@@ -116,6 +116,8 @@ pub struct ExprInfo<'a> {
     pub loc: Loc<'a>,
     pub ty_id: TyId,
     pub value: Option<ConstValue>,
+    pub constant: Option<bool>,
+    pub assignable: Option<bool>,
 }
 
 pub struct Module<'a> {

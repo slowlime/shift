@@ -116,6 +116,8 @@ where
             loc: expr.loc(),
             ty_id: Default::default(),
             value: None,
+            constant: None,
+            assignable: None,
         });
 
         match expr {

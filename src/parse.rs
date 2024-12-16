@@ -547,14 +547,14 @@ fn arm(i: Span<'_>) -> IResult<'_, Arm<'_>> {
 fn stmt_assign_next(i: Span<'_>) -> IResult<'_, StmtAssignNext<'_>> {
     map(
         leading_ws(terminated(
-            consumed(separated_pair(res_path, ws_tag("<="), cut(expr))),
+            consumed(separated_pair(expr, ws_tag("<-"), cut(expr))),
             cut(eol),
         )),
-        |(span, (path, expr))| StmtAssignNext {
+        |(span, (lhs, rhs))| StmtAssignNext {
             id: Default::default(),
             loc: span.into(),
-            path,
-            expr,
+            lhs,
+            rhs,
         },
     )(i)
 }

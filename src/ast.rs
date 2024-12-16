@@ -937,8 +937,8 @@ impl<'a> HasLoc<'a> for Arm<'a> {
 pub struct StmtAssignNext<'a> {
     pub id: StmtId,
     pub loc: Loc<'a>,
-    pub path: ResPath<'a>,
-    pub expr: Expr<'a>,
+    pub lhs: Expr<'a>,
+    pub rhs: Expr<'a>,
 }
 
 impl<'a> StmtRecurse<'a> for StmtAssignNext<'a> {
@@ -946,14 +946,16 @@ impl<'a> StmtRecurse<'a> for StmtAssignNext<'a> {
     where
         'a: 'b,
     {
-        visitor.visit_expr(&self.expr);
+        visitor.visit_expr(&self.lhs);
+        visitor.visit_expr(&self.rhs);
     }
 
     fn recurse_mut<'b, V: StmtVisitorMut<'a, 'b> + ?Sized>(&'b mut self, visitor: &mut V)
     where
         'a: 'b,
     {
-        visitor.visit_expr(&mut self.expr);
+        visitor.visit_expr(&mut self.lhs);
+        visitor.visit_expr(&mut self.rhs);
     }
 }
 

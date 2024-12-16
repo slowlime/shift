@@ -1,14 +1,15 @@
 use std::mem;
 
-use slotmap::Key;
+use slotmap::{Key, SparseSecondaryMap};
 
 use crate::ast::{
-    Block, Decl, DeclConst, DeclEnum, DeclTrans, DeclVar, Expr, HasLoc, Loc, Ty, TyArray, TyBool,
-    TyInt, TyPath, TyRange,
+    Block, Decl, DeclConst, DeclEnum, DeclTrans, DeclVar, DefaultingVar, Else, Expr, HasLoc, Loc,
+    Stmt, StmtAlias, StmtAssignNext, StmtConstFor, StmtDefaulting, StmtEither, StmtIf, StmtMatch,
+    Ty, TyArray, TyBool, TyInt, TyPath, TyRange,
 };
 use crate::diag::DiagCtx;
 
-use super::{BindingId, DeclId, DepGraph, Module, Result, TyDef, TyId};
+use super::{BindingId, BindingKind, DeclId, DepGraph, Module, Result, StmtId, TyDef, TyId};
 
 impl Module<'_> {
     pub(super) fn typeck(&mut self, diag: &mut impl DiagCtx, decl_deps: &DepGraph) -> Result {
@@ -16,15 +17,27 @@ impl Module<'_> {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+struct AliasInfo {
+    assignable: bool,
+    constant: bool,
+}
+
 struct Pass<'src, 'm, 'd, 'dep, D> {
     m: &'m mut Module<'src>,
     diag: &'d mut D,
     decl_deps: &'dep DepGraph,
+    alias_info: SparseSecondaryMap<StmtId, AliasInfo>,
 }
 
 impl<'src, 'm, 'd, 'dep, D: DiagCtx> Pass<'src, 'm, 'd, 'dep, D> {
     fn new(m: &'m mut Module<'src>, diag: &'d mut D, decl_deps: &'dep DepGraph) -> Self {
-        Self { m, diag, decl_deps }
+        Self {
+            m,
+            diag,
+            decl_deps,
+            alias_info: Default::default(),
+        }
     }
 
     fn run(mut self) -> Result {
@@ -280,7 +293,139 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
     }
 
     fn typeck_block(&mut self, block: &mut Block<'src>) -> Result {
-        todo!()
+        #[allow(clippy::manual_try_fold, reason = "short-circuiting is undesirable")]
+        block
+            .stmts
+            .iter_mut()
+            .fold(Ok(()), |r, stmt| r.and(self.typeck_stmt(stmt)))
+    }
+
+    fn typeck_stmt(&mut self, stmt: &mut Stmt<'src>) -> Result {
+        match stmt {
+            Stmt::Dummy => panic!("encountered a dummy statement"),
+            Stmt::ConstFor(stmt) => self.typeck_stmt_const_for(stmt),
+            Stmt::Defaulting(stmt) => self.typeck_stmt_defaulting(stmt),
+            Stmt::Alias(stmt) => self.typeck_stmt_alias(stmt),
+            Stmt::If(stmt) => self.typeck_stmt_if(stmt),
+            Stmt::Match(stmt) => self.typeck_stmt_match(stmt),
+            Stmt::AssignNext(stmt) => self.typeck_stmt_assign_next(stmt),
+            Stmt::Either(stmt) => self.typeck_stmt_either(stmt),
+        }
+    }
+
+    fn typeck_stmt_const_for(&mut self, stmt: &mut StmtConstFor<'src>) -> Result {
+        self.m.bindings[stmt.binding_id].ty_id = self.m.primitive_tys.int;
+        let mut result = self.typeck_expr(&mut stmt.lo);
+        result = result.and(self.check_ty(
+            stmt.lo.loc(),
+            self.m.primitive_tys.int,
+            self.m.exprs[stmt.lo.id()].ty_id,
+        ));
+        result = result.and(self.typeck_expr(&mut stmt.hi));
+        result = result.and(self.check_ty(
+            stmt.hi.loc(),
+            self.m.primitive_tys.int,
+            self.m.exprs[stmt.hi.id()].ty_id,
+        ));
+        result = result.and_then(|_| self.check_const(&stmt.lo).and(self.check_const(&stmt.hi)));
+        result = result.and(self.typeck_block(&mut stmt.body));
+
+        result
+    }
+
+    fn typeck_stmt_defaulting(&mut self, stmt: &mut StmtDefaulting<'src>) -> Result {
+        let mut result = Ok(());
+
+        for var in &mut stmt.vars {
+            result = result.and(match var {
+                DefaultingVar::Var(_) => Ok(()),
+                DefaultingVar::Alias(stmt) => self.typeck_stmt_alias(stmt),
+            });
+        }
+
+        result = result.and(self.typeck_block(&mut stmt.body));
+
+        result
+    }
+
+    fn typeck_stmt_alias(&mut self, stmt: &mut StmtAlias<'src>) -> Result {
+        let result = self.typeck_expr(&mut stmt.expr);
+        self.m.bindings[stmt.binding_id].ty_id = self.m.exprs[stmt.expr.id()].ty_id;
+        self.alias_info.insert(
+            stmt.id,
+            AliasInfo {
+                constant: self.is_const(&stmt.expr),
+                assignable: self.is_assignable(&stmt.expr),
+            },
+        );
+
+        result
+    }
+
+    fn typeck_stmt_if(&mut self, stmt: &mut StmtIf<'src>) -> Result {
+        let mut result = self.typeck_expr(&mut stmt.cond);
+        result = result.and(self.check_ty(
+            stmt.cond.loc(),
+            self.m.primitive_tys.bool,
+            self.m.exprs[stmt.cond.id()].ty_id,
+        ));
+        result = result.and(self.typeck_block(&mut stmt.then_branch));
+
+        if let Some(else_branch) = &mut stmt.else_branch {
+            result = result.and(match else_branch {
+                Else::If(else_if) => self.typeck_stmt_if(else_if),
+                Else::Block(else_branch) => self.typeck_block(else_branch),
+            });
+        }
+
+        result
+    }
+
+    fn typeck_stmt_match(&mut self, stmt: &mut StmtMatch<'src>) -> Result {
+        let mut result = self.typeck_expr(&mut stmt.scrutinee);
+        let scrutinee_ty_id = self.m.exprs[stmt.scrutinee.id()].ty_id;
+
+        for arm in &mut stmt.arms {
+            result = result.and(self.typeck_expr(&mut arm.expr));
+            result = result.and(self.check_ty(
+                arm.expr.loc(),
+                scrutinee_ty_id,
+                self.m.exprs[arm.expr.id()].ty_id,
+            ));
+            result = result.and(self.typeck_block(&mut arm.body));
+        }
+
+        result
+    }
+
+    fn typeck_stmt_assign_next(&mut self, stmt: &mut StmtAssignNext<'src>) -> Result {
+        let mut result = self.typeck_expr(&mut stmt.lhs);
+        result = result.and(self.check_assignable(&stmt.lhs));
+        result = result.and(self.typeck_expr(&mut stmt.rhs));
+        let expected_ty_id = self.m.exprs[stmt.lhs.id()].ty_id;
+        result = result.and(self.check_ty(
+            stmt.rhs.loc(),
+            expected_ty_id,
+            self.m.exprs[stmt.rhs.id()].ty_id,
+        ));
+
+        if self.is_const(&stmt.lhs) {
+            self.diag
+                .err_at(stmt.loc(), "cannot assign to a constant".into());
+            result = Err(());
+        }
+
+        result
+    }
+
+    fn typeck_stmt_either(&mut self, stmt: &mut StmtEither<'src>) -> Result {
+        let mut result = Ok(());
+
+        for block in &mut stmt.blocks {
+            result = result.and(self.typeck_block(block));
+        }
+
+        result
     }
 
     fn typeck_expr(&mut self, expr: &mut Expr<'src>) -> Result {
@@ -302,6 +447,35 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
         }
 
         Ok(())
+    }
+}
+
+// Expression properties.
+impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
+    fn is_const_binding(&self, binding_id: BindingId) -> bool {
+        match self.m.bindings[binding_id].kind {
+            BindingKind::Const(_) => true,
+            BindingKind::ConstFor(_) => true,
+            BindingKind::Var(_) => false,
+            BindingKind::Alias(stmt_id) => self.alias_info[stmt_id].constant,
+            BindingKind::Variant(..) => true,
+        }
+    }
+
+    fn is_const(&self, expr: &Expr<'src>) -> bool {
+        todo!()
+    }
+
+    fn check_const(&mut self, expr: &Expr<'src>) -> Result {
+        todo!()
+    }
+
+    fn is_assignable(&self, expr: &Expr<'src>) -> bool {
+        todo!()
+    }
+
+    fn check_assignable(&mut self, expr: &Expr<'src>) -> Result {
+        todo!()
     }
 }
 

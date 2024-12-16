@@ -478,12 +478,7 @@ where
     }
 
     fn visit_assign_next(&mut self, stmt: &'ast mut StmtAssignNext<'src>) {
-        self.visit_expr(&mut stmt.expr);
-        self.result = self.result.and(self.resolve_path(
-            Namespace::Value,
-            self.current_scope_id,
-            &mut stmt.path,
-        ));
+        stmt.recurse_mut(self);
     }
 
     fn visit_either(&mut self, stmt: &'ast mut StmtEither<'src>) {

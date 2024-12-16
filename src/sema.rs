@@ -54,7 +54,7 @@ pub struct TyNs<'a> {
 pub struct Binding<'a> {
     pub ty_id: TyId,
     pub loc: Loc<'a>,
-    pub name: Option<String>,
+    pub name: String,
     pub kind: BindingKind,
 }
 
@@ -89,10 +89,12 @@ pub struct StmtInfo<'a> {
     pub loc: Loc<'a>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConstValue {
     Int(i64),
     Bool(bool),
+    Variant(DeclId, usize),
+    Error,
 }
 
 impl ConstValue {

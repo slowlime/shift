@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::mem;
 
-use slotmap::{Key, SparseSecondaryMap};
+use slotmap::{Key, SlotMap, SparseSecondaryMap};
 
 use crate::ast::{
     BinOp, Block, Builtin, Decl, DeclConst, DeclEnum, DeclTrans, DeclVar, DefaultingVar, Else,
@@ -9,10 +9,11 @@ use crate::ast::{
     HasLoc, Loc, Stmt, StmtAlias, StmtAssignNext, StmtConstFor, StmtDefaulting, StmtEither, StmtIf,
     StmtMatch, Ty, TyArray, TyBool, TyInt, TyPath, TyRange, UnOp,
 };
-use crate::diag::DiagCtx;
+use crate::diag::{self, Diag, DiagCtx, Note};
 
 use super::{
-    BindingId, BindingKind, DeclId, DepGraph, ExprId, Module, Result, StmtId, TyDef, TyId,
+    Binding, BindingId, BindingKind, ConstValue, DeclId, DepGraph, ExprId, ExprInfo, Module,
+    Result, StmtId, TyDef, TyId,
 };
 
 impl Module<'_> {
@@ -21,17 +22,16 @@ impl Module<'_> {
     }
 }
 
-#[derive(Debug, Default, Clone)]
-struct AliasInfo {
-    assignable: bool,
-    constant: bool,
+struct AliasInfo<'src> {
+    def: Expr<'src>,
+    binding_id: BindingId,
 }
 
 struct Pass<'src, 'm, 'd, 'dep, D> {
     m: &'m mut Module<'src>,
     diag: &'d mut D,
     decl_deps: &'dep DepGraph,
-    alias_info: SparseSecondaryMap<StmtId, AliasInfo>,
+    aliases: SparseSecondaryMap<StmtId, AliasInfo<'src>>,
 }
 
 impl<'src, 'm, 'd, 'dep, D: DiagCtx> Pass<'src, 'm, 'd, 'dep, D> {
@@ -40,7 +40,7 @@ impl<'src, 'm, 'd, 'dep, D: DiagCtx> Pass<'src, 'm, 'd, 'dep, D> {
             m,
             diag,
             decl_deps,
-            alias_info: Default::default(),
+            aliases: Default::default(),
         }
     }
 
@@ -370,11 +370,11 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
     fn typeck_stmt_alias(&mut self, stmt: &mut StmtAlias<'src>) -> Result {
         let result = self.typeck_expr(&mut stmt.expr);
         self.m.bindings[stmt.binding_id].ty_id = self.m.exprs[stmt.expr.id()].ty_id;
-        self.alias_info.insert(
+        self.aliases.insert(
             stmt.id,
             AliasInfo {
-                constant: self.m.exprs[stmt.expr.id()].constant.unwrap(),
-                assignable: self.m.exprs[stmt.expr.id()].assignable.unwrap(),
+                def: stmt.expr.clone(), // HACK: figure out a less memory-intensive way to do this.
+                binding_id: stmt.binding_id,
             },
         );
 
@@ -707,7 +707,9 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
             BindingKind::Const(_) => true,
             BindingKind::ConstFor(_) => true,
             BindingKind::Var(_) => false,
-            BindingKind::Alias(stmt_id) => self.alias_info[stmt_id].constant,
+            BindingKind::Alias(stmt_id) => self.m.exprs[self.aliases[stmt_id].def.id()]
+                .constant
+                .unwrap(),
             BindingKind::Variant(..) => true,
         }
     }
@@ -759,6 +761,257 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
 // Constant expression evaluation.
 impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
     fn const_eval(&mut self, expr: &mut Expr<'src>) -> Result {
-        todo!()
+        ConstEvaluator::new(self).eval_expr(expr)
+    }
+}
+
+struct ConstEvaluator<'src, 'a, D> {
+    decls: &'a SlotMap<DeclId, Decl<'src>>,
+    bindings: &'a SlotMap<BindingId, Binding<'src>>,
+    exprs: &'a mut SlotMap<ExprId, ExprInfo<'src>>,
+    aliases: &'a SparseSecondaryMap<StmtId, AliasInfo<'src>>,
+    eval_stack: Vec<(Loc<'src>, String)>,
+    diag: &'a mut D,
+}
+
+macro_rules! return_cached_eval {
+    ($self:ident, $expr:ident) => {
+        match $self.exprs[$expr.id].value {
+            Some(ConstValue::Error) => return Err(()),
+            Some(_) => return Ok(()),
+            _ => {}
+        }
+    };
+}
+
+impl<'src, 'a, D: DiagCtx> ConstEvaluator<'src, 'a, D> {
+    fn new(pass: &'a mut Pass<'src, '_, '_, '_, D>) -> Self {
+        Self {
+            decls: &pass.m.decls,
+            bindings: &pass.m.bindings,
+            exprs: &mut pass.m.exprs,
+            aliases: &pass.aliases,
+            eval_stack: vec![],
+            diag: pass.diag,
+        }
+    }
+
+    fn err_at(&mut self, loc: Loc<'src>, message: String) {
+        self.diag.emit(Diag {
+            level: diag::Level::Err,
+            loc: Some(loc),
+            message,
+            notes: self
+                .eval_stack
+                .iter()
+                .rev()
+                .map(|(loc, ctx)| Note {
+                    loc: Some(*loc),
+                    message: format!("...while evaluating {ctx}"),
+                })
+                .collect(),
+        });
+    }
+
+    fn eval_expr(&mut self, expr: &Expr<'src>) -> Result {
+        match expr {
+            Expr::Dummy => panic!("encountered a dummy expression"),
+            Expr::Path(expr) => self.eval_expr_path(expr),
+            Expr::Bool(expr) => self.eval_expr_bool(expr),
+            Expr::Int(expr) => self.eval_expr_int(expr),
+            Expr::ArrayRepeat(expr) => self.eval_expr_array_repeat(expr),
+            Expr::Index(expr) => self.eval_expr_index(expr),
+            Expr::Binary(expr) => self.eval_expr_binary(expr),
+            Expr::Unary(expr) => self.eval_expr_unary(expr),
+            Expr::Func(expr) => self.eval_expr_func(expr),
+        }
+    }
+
+    fn eval_expr_path(&mut self, expr: &ExprPath<'src>) -> Result {
+        return_cached_eval!(self, expr);
+        self.exprs[expr.id].value = Some(ConstValue::Error);
+
+        match self.bindings[expr.path.res.unwrap().into_binding_id()].kind {
+            BindingKind::Const(decl_id) => {
+                let decl = &self.decls[decl_id].as_const();
+                self.eval_stack
+                    .push((expr.loc(), format!("a constant `{}`", decl.name)));
+                let result = self.eval_expr(&decl.expr);
+                self.eval_stack.pop();
+                result?;
+                self.exprs[expr.id].value = self.exprs[decl.expr.id()].value.clone();
+
+                Ok(())
+            }
+
+            BindingKind::ConstFor(_) => {
+                self.diag.err_at(
+                    expr.loc(),
+                    "cannot evaluate a constant for variable while type-checking".into(),
+                );
+
+                Err(())
+            }
+
+            BindingKind::Var(_) => {
+                self.diag.err_at(
+                    expr.loc(),
+                    "cannot evaluate a variable while type-checking".into(),
+                );
+
+                Err(())
+            }
+
+            BindingKind::Alias(stmt_id) => {
+                let alias_info = &self.aliases[stmt_id];
+                let name = &self.bindings[alias_info.binding_id].name;
+                self.eval_stack
+                    .push((expr.loc(), format!("an alias `{name}`")));
+                let result = self.eval_expr(&alias_info.def);
+                self.eval_stack.pop();
+                result?;
+                self.exprs[expr.id].value = self.exprs[alias_info.def.id()].value.clone();
+
+                Ok(())
+            }
+
+            BindingKind::Variant(decl_id, idx) => {
+                self.exprs[expr.id].value = Some(ConstValue::Variant(decl_id, idx));
+
+                Ok(())
+            }
+        }
+    }
+
+    fn eval_expr_bool(&mut self, expr: &ExprBool<'src>) -> Result {
+        return_cached_eval!(self, expr);
+        self.exprs[expr.id].value = Some(ConstValue::Bool(expr.value));
+
+        Ok(())
+    }
+
+    fn eval_expr_int(&mut self, expr: &ExprInt<'src>) -> Result {
+        return_cached_eval!(self, expr);
+        self.exprs[expr.id].value = Some(ConstValue::Int(expr.value));
+
+        Ok(())
+    }
+
+    fn eval_expr_array_repeat(&mut self, expr: &ExprArrayRepeat<'src>) -> Result {
+        return_cached_eval!(self, expr);
+        self.exprs[expr.id].value = Some(ConstValue::Error);
+        self.err_at(
+            expr.loc(),
+            format!("array expressions cannot be evaluated in a constant context"),
+        );
+
+        Err(())
+    }
+
+    fn eval_expr_index(&mut self, expr: &ExprIndex<'src>) -> Result {
+        return_cached_eval!(self, expr);
+        self.exprs[expr.id].value = Some(ConstValue::Error);
+        self.err_at(
+            expr.loc(),
+            format!("index expressions cannot be evaluated in a constant context"),
+        );
+
+        Err(())
+    }
+
+    fn eval_expr_binary(&mut self, expr: &ExprBinary<'src>) -> Result {
+        return_cached_eval!(self, expr);
+        self.exprs[expr.id].value = Some(ConstValue::Error);
+        self.eval_expr(&expr.lhs)?;
+        self.eval_expr(&expr.rhs)?;
+
+        let lhs = self.exprs[expr.lhs.id()].value.as_ref().unwrap();
+        let rhs = self.exprs[expr.rhs.id()].value.as_ref().unwrap();
+
+        let value = match expr.op {
+            BinOp::Add => match lhs.to_int().checked_add(rhs.to_int()) {
+                Some(r) => ConstValue::Int(r),
+                None => {
+                    self.err_at(
+                        expr.loc(),
+                        "encountered an integer overflow while evaluating a constant".into(),
+                    );
+                    return Err(());
+                }
+            },
+
+            BinOp::Sub => match lhs.to_int().checked_sub(rhs.to_int()) {
+                Some(r) => ConstValue::Int(r),
+                None => {
+                    self.err_at(
+                        expr.loc(),
+                        "encountered an integer overflow while evaluating a constant".into(),
+                    );
+                    return Err(());
+                }
+            },
+
+            BinOp::And => ConstValue::Bool(lhs.to_bool() & rhs.to_bool()),
+            BinOp::Or => ConstValue::Bool(lhs.to_bool() | rhs.to_bool()),
+
+            BinOp::Lt => ConstValue::Bool(lhs.to_int() < rhs.to_int()),
+            BinOp::Le => ConstValue::Bool(lhs.to_int() <= rhs.to_int()),
+            BinOp::Gt => ConstValue::Bool(lhs.to_int() > rhs.to_int()),
+            BinOp::Ge => ConstValue::Bool(lhs.to_int() >= rhs.to_int()),
+
+            BinOp::Eq => ConstValue::Bool(lhs == rhs),
+            BinOp::Ne => ConstValue::Bool(lhs != rhs),
+        };
+
+        self.exprs[expr.id].value = Some(value);
+
+        Ok(())
+    }
+
+    fn eval_expr_unary(&mut self, expr: &ExprUnary<'src>) -> Result {
+        return_cached_eval!(self, expr);
+        self.exprs[expr.id].value = Some(ConstValue::Error);
+        self.eval_expr(&expr.expr)?;
+
+        let inner = self.exprs[expr.expr.id()].value.as_ref().unwrap();
+
+        let value = match expr.op {
+            UnOp::Neg => match inner.to_int().checked_neg() {
+                Some(r) => ConstValue::Int(r),
+                None => {
+                    self.err_at(
+                        expr.loc(),
+                        "encountered an integer overflow while evaluating a constant".into(),
+                    );
+                    return Err(());
+                }
+            },
+
+            UnOp::Not => ConstValue::Bool(inner.to_bool()),
+        };
+
+        self.exprs[expr.id].value = Some(value);
+
+        Ok(())
+    }
+
+    fn eval_expr_func(&mut self, expr: &ExprFunc<'src>) -> Result {
+        return_cached_eval!(self, expr);
+        self.exprs[expr.id].value = Some(ConstValue::Error);
+        #[allow(clippy::manual_try_fold, reason = "short-circuiting is undesirable")]
+        expr.args
+            .iter()
+            .fold(Ok(()), |r, expr| r.and(self.eval_expr(expr)))?;
+
+        let arg = |idx: usize| self.exprs[expr.args[idx].id()].value.as_ref().unwrap();
+
+        let value = match expr.builtin {
+            Builtin::Min => ConstValue::Int(arg(0).to_int().min(arg(1).to_int())),
+            Builtin::Max => ConstValue::Int(arg(0).to_int().max(arg(2).to_int())),
+        };
+
+        self.exprs[expr.id].value = Some(value);
+
+        Ok(())
     }
 }

@@ -3,10 +3,17 @@ use std::fmt::Write;
 use crate::ast::Loc;
 
 #[derive(Debug, Clone)]
+pub struct Note<'a> {
+    pub loc: Option<Loc<'a>>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct Diag<'a> {
     pub level: Level,
     pub loc: Option<Loc<'a>>,
     pub message: String,
+    pub notes: Vec<Note<'a>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -23,6 +30,7 @@ pub trait DiagCtx {
             level: Level::Warn,
             loc: None,
             message,
+            notes: vec![],
         });
     }
 
@@ -31,6 +39,7 @@ pub trait DiagCtx {
             level: Level::Warn,
             loc: Some(loc),
             message,
+            notes: vec![],
         });
     }
 
@@ -39,6 +48,7 @@ pub trait DiagCtx {
             level: Level::Err,
             loc: None,
             message,
+            notes: vec![],
         });
     }
 
@@ -47,6 +57,7 @@ pub trait DiagCtx {
             level: Level::Err,
             loc: Some(loc),
             message,
+            notes: vec![],
         });
     }
 }
@@ -67,7 +78,18 @@ impl DiagCtx for StderrDiagCtx {
             let _ = write!(buf, " at {loc}");
         }
 
-        let _ = write!(buf, ": {}", diag.message);
-        eprintln!("{buf}");
+        let _ = writeln!(buf, ": {}", diag.message);
+
+        for note in diag.notes {
+            let _ = write!(buf, "  note");
+
+            if let Some(loc) = diag.loc {
+                let _ = write!(buf, " at {loc}");
+            }
+
+            let _ = writeln!(buf, ": {}", note.message);
+        }
+
+        eprint!("{buf}");
     }
 }

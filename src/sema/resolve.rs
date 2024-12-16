@@ -232,7 +232,7 @@ impl<'src, 'm, 'd, D: DiagCtx> Pass<'src, 'm, 'd, D> {
                     Binding {
                         ty_id: Default::default(),
                         loc: decl.name.loc(),
-                        name: Some(name),
+                        name,
                         kind: BindingKind::Const(decl_id),
                     },
                 )?;
@@ -268,7 +268,7 @@ impl<'src, 'm, 'd, D: DiagCtx> Pass<'src, 'm, 'd, D> {
                             Binding {
                                 ty_id: Default::default(),
                                 loc: variant.loc(),
-                                name: Some(name),
+                                name,
                                 kind: BindingKind::Variant(decl_id, idx),
                             },
                         )
@@ -290,7 +290,7 @@ impl<'src, 'm, 'd, D: DiagCtx> Pass<'src, 'm, 'd, D> {
                     Binding {
                         ty_id: Default::default(),
                         loc: decl.name.loc(),
-                        name: Some(name),
+                        name,
                         kind: BindingKind::Var(decl_id),
                     },
                 )?;
@@ -385,7 +385,7 @@ where
                     Binding {
                         ty_id: Default::default(),
                         loc: stmt.var.loc(),
-                        name: Some(name),
+                        name,
                         kind: BindingKind::ConstFor(stmt.id),
                     },
                 )
@@ -434,7 +434,7 @@ where
                     Binding {
                         ty_id: Default::default(),
                         loc: stmt.name.loc(),
-                        name: Some(name),
+                        name,
                         kind: BindingKind::Alias(stmt.id),
                     },
                 )

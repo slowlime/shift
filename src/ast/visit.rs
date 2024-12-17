@@ -156,25 +156,27 @@ define_visitor! {
 
     rec {
         visit_expr(expr: super::Expr<'a>);
-        visit_array_repeat(expr: super::ExprArrayRepeat<'a>);
-        visit_index(expr: super::ExprIndex<'a>);
-        visit_binary(expr: super::ExprBinary<'a>);
-        visit_unary(expr: super::ExprUnary<'a>);
-        visit_func(expr: super::ExprFunc<'a>);
+        visit_expr_array_repeat(expr: super::ExprArrayRepeat<'a>);
+        visit_expr_index(expr: super::ExprIndex<'a>);
+        visit_expr_binary(expr: super::ExprBinary<'a>);
+        visit_expr_unary(expr: super::ExprUnary<'a>);
+        visit_expr_func(expr: super::ExprFunc<'a>);
+        visit_expr_path(expr: super::ExprPath<'a>);
 
         visit_ty(ty: super::Ty<'a>);
         visit_ty_range(ty: super::TyRange<'a>);
         visit_ty_array(ty: super::TyArray<'a>);
+        visit_ty_path(ty: super::TyPath<'a>);
     }
 
     leaf {
-        visit_path(expr: super::ExprPath<'a>);
         visit_bool(expr: super::ExprBool<'a>);
         visit_int(expr: super::ExprInt<'a>);
 
         visit_ty_int(ty: super::TyInt<'a>);
         visit_ty_bool(ty: super::TyBool<'a>);
-        visit_ty_path(ty: super::TyPath<'a>);
+
+        visit_path(path: super::Path<'a>);
     }
 }
 
@@ -188,13 +190,17 @@ define_visitor! {
 
     rec {
         visit_stmt(stmt: super::Stmt<'a>);
-        visit_const_for(stmt: super::StmtConstFor<'a>);
-        visit_defaulting(stmt: super::StmtDefaulting<'a>);
-        visit_alias(stmt: super::StmtAlias<'a>);
-        visit_if(stmt: super::StmtIf<'a>);
-        visit_match(stmt: super::StmtMatch<'a>);
-        visit_assign_next(stmt: super::StmtAssignNext<'a>);
-        visit_either(stmt: super::StmtEither<'a>);
+        visit_stmt_const_for(stmt: super::StmtConstFor<'a>);
+        visit_stmt_defaulting(stmt: super::StmtDefaulting<'a>);
+        visit_stmt_alias(stmt: super::StmtAlias<'a>);
+        visit_stmt_if(stmt: super::StmtIf<'a>);
+        visit_stmt_match(stmt: super::StmtMatch<'a>);
+        visit_stmt_assign_next(stmt: super::StmtAssignNext<'a>);
+        visit_stmt_either(stmt: super::StmtEither<'a>);
+    }
+
+    leaf {
+        visit_binding(binding: super::Binding<'a>);
     }
 }
 
@@ -208,12 +214,9 @@ define_visitor! {
 
     rec {
         visit_decl(decl: super::Decl<'a>);
-        visit_const(decl: super::DeclConst<'a>);
-        visit_var(decl: super::DeclVar<'a>);
-        visit_trans(decl: super::DeclTrans<'a>);
-    }
-
-    leaf {
+        visit_decl_const(decl: super::DeclConst<'a>);
+        visit_decl_var(decl: super::DeclVar<'a>);
+        visit_decl_trans(decl: super::DeclTrans<'a>);
         visit_enum(decl: super::DeclEnum<'a>);
     }
 }

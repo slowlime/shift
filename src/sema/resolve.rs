@@ -3,16 +3,16 @@ use std::mem;
 use derive_more::derive::{Display, From};
 
 use crate::ast::visit::{
-    DeclRecurse, DefaultDeclVisitorMut, DefaultVisitorMut, StmtRecurse, StmtVisitorMut,
+    DeclRecurse, DefaultDeclVisitor, DefaultVisitor, StmtRecurse, StmtVisitor,
 };
 use crate::ast::{
-    Decl, DeclTrans, DefaultingVar, Else, ExprPath, HasLoc, Name, Path, ResPath, Stmt, StmtAlias,
+    Binding, Decl, DeclTrans, DefaultingVar, Else, ExprPath, HasLoc, Name, Path, Stmt, StmtAlias,
     StmtAssignNext, StmtConstFor, StmtDefaulting, StmtEither, StmtIf, StmtMatch, TyPath,
 };
 use crate::diag::DiagCtx;
 
 use super::{
-    Binding, BindingId, BindingKind, DeclId, Module, Result, Scope, ScopeId, TyNs, TyNsId,
+    BindingId, BindingInfo, BindingKind, DeclId, Module, Result, Scope, ScopeId, TyNs, TyNsId,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -137,16 +137,16 @@ impl Module<'_> {
 #[derive(From)]
 enum ScopeValue<'a> {
     Ty(TyNs<'a>),
-    Binding(Binding<'a>),
+    Binding(BindingInfo<'a>),
 }
 
-struct Pass<'src, 'm, 'd, D> {
+struct Pass<'src, 'm, D> {
     m: &'m mut Module<'src>,
-    diag: &'d mut D,
+    diag: &'m mut D,
 }
 
-impl<'src, 'm, 'd, D: DiagCtx> Pass<'src, 'm, 'd, D> {
-    fn new(m: &'m mut Module<'src>, diag: &'d mut D) -> Self {
+impl<'src, 'm, D: DiagCtx> Pass<'src, 'm, D> {
+    fn new(m: &'m mut Module<'src>, diag: &'m mut D) -> Self {
         Self { m, diag }
     }
 
@@ -198,13 +198,13 @@ impl<'src, 'm, 'd, D: DiagCtx> Pass<'src, 'm, 'd, D> {
         &mut self,
         scope_id: ScopeId,
         name: String,
-        binding: Binding<'src>,
-    ) -> Result<BindingId> {
+        binding_id: BindingId,
+    ) -> Result {
         let scope = &mut self.m.scopes[scope_id];
 
         if let Some(&prev_binding_id) = scope.values.get(&name) {
             self.diag.err_at(
-                binding.loc,
+                self.m.bindings[binding_id].loc,
                 format!(
                     "name `{name}` is already used (previously defined {})",
                     self.m.bindings[prev_binding_id].loc.fmt_defined_at()
@@ -214,87 +214,63 @@ impl<'src, 'm, 'd, D: DiagCtx> Pass<'src, 'm, 'd, D> {
             return Err(());
         }
 
-        let binding_id = self.m.bindings.insert(binding);
         scope.values.insert(name, binding_id);
 
-        Ok(binding_id)
+        Ok(())
     }
 
     fn add_decl_to_root_scope(&mut self, decl_id: DeclId) -> Result {
-        match &self.m.decls[decl_id] {
+        match self.m.decls[decl_id].def {
             Decl::Dummy => panic!("encountered a dummy decl"),
 
             Decl::Const(decl) => {
-                let name = decl.name.to_string();
-                let binding_id = self.add_value_to_scope(
-                    self.m.root_scope_id,
-                    name.clone(),
-                    Binding {
-                        ty_id: Default::default(),
-                        loc: decl.name.loc(),
-                        name,
-                        kind: BindingKind::Const(decl_id),
-                    },
-                )?;
-                self.m.decls[decl_id].as_const_mut().binding_id = binding_id;
+                let name = decl.binding.name.to_string();
+                self.m.bindings[decl.binding.id].kind = Some(BindingKind::Const(decl_id));
+                self.add_value_to_scope(self.m.root_scope_id, name.clone(), decl.binding.id)?;
 
                 Ok(())
             }
 
             Decl::Enum(decl) => {
-                let variant_count = decl.variants.len();
                 let enum_scope_id = self.m.scopes.insert(Scope::new(Some(self.m.root_scope_id)));
                 let ty_ns_id = self.add_ty_to_scope(
                     self.m.root_scope_id,
                     decl.name.to_string(),
                     TyNs {
                         loc: decl.loc,
-                        ty_id: Default::default(),
+                        ty_def_id: Default::default(),
                         scope_id: enum_scope_id,
                     },
                 )?;
-                self.m.decls[decl_id].as_enum_mut().ty_ns_id = ty_ns_id;
+                self.m.decl_ty_ns.insert(decl_id, ty_ns_id);
 
                 let mut result = Ok(());
 
-                for idx in 0..variant_count {
-                    let variant = &self.m.decls[decl_id].as_enum().variants[idx];
-                    let name = variant.name.to_string();
+                for (idx, variant) in self.m.decls[decl_id]
+                    .def
+                    .as_enum()
+                    .variants
+                    .iter()
+                    .enumerate()
+                {
+                    let name = variant.binding.name.to_string();
+                    self.m.bindings[variant.binding.id].kind =
+                        Some(BindingKind::Variant(decl_id, idx));
 
-                    result = result.and(
-                        self.add_value_to_scope(
-                            enum_scope_id,
-                            name.clone(),
-                            Binding {
-                                ty_id: Default::default(),
-                                loc: variant.loc(),
-                                name,
-                                kind: BindingKind::Variant(decl_id, idx),
-                            },
-                        )
-                        .map(|binding_id| {
-                            self.m.decls[decl_id].as_enum_mut().variants[idx].binding_id =
-                                binding_id;
-                        }),
-                    );
+                    result = result.and(self.add_value_to_scope(
+                        enum_scope_id,
+                        name.clone(),
+                        variant.binding.id,
+                    ));
                 }
 
                 result
             }
 
             Decl::Var(decl) => {
-                let name = decl.name.to_string();
-                let binding_id = self.add_value_to_scope(
-                    self.m.root_scope_id,
-                    name.clone(),
-                    Binding {
-                        ty_id: Default::default(),
-                        loc: decl.name.loc(),
-                        name,
-                        kind: BindingKind::Var(decl_id),
-                    },
-                )?;
-                self.m.decls[decl_id].as_var_mut().binding_id = binding_id;
+                let name = decl.binding.name.to_string();
+                self.m.bindings[decl.binding.id].kind = Some(BindingKind::Var(decl_id));
+                self.add_value_to_scope(self.m.root_scope_id, name.clone(), decl.binding.id)?;
 
                 Ok(())
             }
@@ -308,28 +284,27 @@ impl<'src, 'm, 'd, D: DiagCtx> Pass<'src, 'm, 'd, D> {
         let mut result = Ok(());
 
         for decl_id in decl_ids {
-            let mut decl = mem::take(&mut self.m.decls[decl_id]);
+            let decl = self.m.decls[decl_id].def;
             let mut walker = Walker {
                 result: Ok(()),
                 current_scope_id: self.m.root_scope_id,
                 pass: self,
             };
-            walker.visit_decl(&mut decl);
+            walker.visit_decl(decl);
             result = result.and(walker.result);
-            self.m.decls[decl_id] = decl;
         }
 
         result
     }
 }
 
-struct Walker<'src, 'm, 'd, 'p, D> {
-    pass: &'p mut Pass<'src, 'm, 'd, D>,
+struct Walker<'src, 'm, 'p, D> {
+    pass: &'p mut Pass<'src, 'm, D>,
     result: Result,
     current_scope_id: ScopeId,
 }
 
-impl<D: DiagCtx> Walker<'_, '_, '_, '_, D> {
+impl<D: DiagCtx> Walker<'_, '_, '_, D> {
     fn enter_scope(&mut self) -> ScopeId {
         let scope_id = self
             .pass
@@ -340,68 +315,54 @@ impl<D: DiagCtx> Walker<'_, '_, '_, '_, D> {
         mem::replace(&mut self.current_scope_id, scope_id)
     }
 
-    fn resolve_path(&mut self, ns: Namespace, scope_id: ScopeId, path: &mut ResPath<'_>) -> Result {
+    fn resolve_path(&mut self, ns: Namespace, scope_id: ScopeId, path: &Path<'_>) -> Result {
         self.pass
             .m
-            .resolve_path(self.pass.diag, ns, scope_id, &path.path)
+            .resolve_path(self.pass.diag, ns, scope_id, path)
             .map(|res| {
-                path.res = Some(res);
+                self.pass.m.paths[path.id].res = Some(res);
             })
     }
 }
 
-impl<'src, 'ast, D> DefaultDeclVisitorMut<'src, 'ast> for Walker<'src, '_, '_, '_, D>
+impl<'src, 'ast, D> DefaultDeclVisitor<'src, 'ast> for Walker<'src, '_, '_, D>
 where
     D: DiagCtx,
     'src: 'ast,
 {
-    fn visit_trans(&mut self, decl: &'ast mut DeclTrans<'src>) {
+    fn visit_decl_trans(&mut self, decl: &'ast DeclTrans<'src>) {
         let prev_scope_id = self.enter_scope();
-        decl.recurse_mut(self);
+        decl.recurse(self);
         self.current_scope_id = prev_scope_id;
     }
 }
 
-impl<'src, 'ast, D> StmtVisitorMut<'src, 'ast> for Walker<'src, '_, '_, '_, D>
+impl<'src, 'ast, D> StmtVisitor<'src, 'ast> for Walker<'src, '_, '_, D>
 where
     D: DiagCtx,
     'src: 'ast,
 {
-    fn visit_stmt(&mut self, stmt: &'ast mut Stmt<'src>) {
-        stmt.recurse_mut(self);
+    fn visit_stmt(&mut self, stmt: &'ast Stmt<'src>) {
+        stmt.recurse(self);
     }
 
-    fn visit_const_for(&mut self, stmt: &'ast mut StmtConstFor<'src>) {
-        self.visit_expr(&mut stmt.lo);
-        self.visit_expr(&mut stmt.hi);
+    fn visit_stmt_const_for(&mut self, stmt: &'ast StmtConstFor<'src>) {
+        self.visit_expr(&stmt.lo);
+        self.visit_expr(&stmt.hi);
 
         let prev_scope_id = self.enter_scope();
-        let name = stmt.var.to_string();
-        self.result = self.result.and(
-            self.pass
-                .add_value_to_scope(
-                    self.current_scope_id,
-                    name.clone(),
-                    Binding {
-                        ty_id: Default::default(),
-                        loc: stmt.var.loc(),
-                        name,
-                        kind: BindingKind::ConstFor(stmt.id),
-                    },
-                )
-                .map(|binding_id| {
-                    stmt.binding_id = binding_id;
-                }),
-        );
+        self.pass.m.bindings[stmt.binding.id].kind = Some(BindingKind::ConstFor(stmt.id));
+        self.visit_binding(&stmt.binding);
+
         self.enter_scope();
-        stmt.body.recurse_mut(self);
+        stmt.body.recurse(self);
         self.current_scope_id = prev_scope_id;
     }
 
-    fn visit_defaulting(&mut self, stmt: &'ast mut StmtDefaulting<'src>) {
+    fn visit_stmt_defaulting(&mut self, stmt: &'ast StmtDefaulting<'src>) {
         let prev_scope_id = self.enter_scope();
 
-        for var in &mut stmt.vars {
+        for var in &stmt.vars {
             match var {
                 DefaultingVar::Var(path) => {
                     self.result = self.result.and(self.resolve_path(
@@ -412,53 +373,37 @@ where
                 }
 
                 DefaultingVar::Alias(stmt) => {
-                    self.visit_alias(stmt);
+                    self.visit_stmt_alias(stmt);
                 }
             }
         }
 
         self.enter_scope();
-        stmt.body.recurse_mut(self);
+        stmt.body.recurse(self);
         self.current_scope_id = prev_scope_id;
     }
 
-    fn visit_alias(&mut self, stmt: &'ast mut StmtAlias<'src>) {
-        self.visit_expr(&mut stmt.expr);
-
-        let name = stmt.name.to_string();
-        self.result = self.result.and(
-            self.pass
-                .add_value_to_scope(
-                    self.current_scope_id,
-                    name.clone(),
-                    Binding {
-                        ty_id: Default::default(),
-                        loc: stmt.name.loc(),
-                        name,
-                        kind: BindingKind::Alias(stmt.id),
-                    },
-                )
-                .map(|binding_id| {
-                    stmt.binding_id = binding_id;
-                }),
-        );
+    fn visit_stmt_alias(&mut self, stmt: &'ast StmtAlias<'src>) {
+        self.visit_expr(&stmt.expr);
+        self.pass.m.bindings[stmt.binding.id].kind = Some(BindingKind::Alias(stmt.id));
+        self.visit_binding(&stmt.binding);
     }
 
-    fn visit_if(&mut self, stmt: &'ast mut StmtIf<'src>) {
-        self.visit_expr(&mut stmt.cond);
+    fn visit_stmt_if(&mut self, stmt: &'ast StmtIf<'src>) {
+        self.visit_expr(&stmt.cond);
 
         let prev_scope_id = self.enter_scope();
-        stmt.then_branch.recurse_mut(self);
+        stmt.then_branch.recurse(self);
         self.current_scope_id = prev_scope_id;
 
-        match &mut stmt.else_branch {
+        match &stmt.else_branch {
             Some(Else::If(stmt)) => {
-                self.visit_if(stmt);
+                self.visit_stmt_if(stmt);
             }
 
             Some(Else::Block(block)) => {
                 let prev_scope_id = self.enter_scope();
-                block.recurse_mut(self);
+                block.recurse(self);
                 self.current_scope_id = prev_scope_id;
             }
 
@@ -466,46 +411,52 @@ where
         }
     }
 
-    fn visit_match(&mut self, stmt: &'ast mut StmtMatch<'src>) {
-        self.visit_expr(&mut stmt.scrutinee);
+    fn visit_stmt_match(&mut self, stmt: &'ast StmtMatch<'src>) {
+        self.visit_expr(&stmt.scrutinee);
 
-        for arm in &mut stmt.arms {
-            self.visit_expr(&mut arm.expr);
+        for arm in &stmt.arms {
+            self.visit_expr(&arm.expr);
             let prev_scope_id = self.enter_scope();
-            arm.body.recurse_mut(self);
+            arm.body.recurse(self);
             self.current_scope_id = prev_scope_id;
         }
     }
 
-    fn visit_assign_next(&mut self, stmt: &'ast mut StmtAssignNext<'src>) {
-        stmt.recurse_mut(self);
+    fn visit_stmt_assign_next(&mut self, stmt: &'ast StmtAssignNext<'src>) {
+        stmt.recurse(self);
     }
 
-    fn visit_either(&mut self, stmt: &'ast mut StmtEither<'src>) {
-        for block in &mut stmt.blocks {
+    fn visit_stmt_either(&mut self, stmt: &'ast StmtEither<'src>) {
+        for block in &stmt.blocks {
             let prev_scope_id = self.enter_scope();
-            block.recurse_mut(self);
+            block.recurse(self);
             self.current_scope_id = prev_scope_id;
         }
+    }
+
+    fn visit_binding(&mut self, binding: &'ast Binding<'src>) {
+        self.result = self.result.and(self.pass.add_value_to_scope(
+            self.current_scope_id,
+            binding.name.to_string(),
+            binding.id,
+        ));
     }
 }
 
-impl<'src, 'ast, D> DefaultVisitorMut<'src, 'ast> for Walker<'src, '_, '_, '_, D>
+impl<'src, 'ast, D> DefaultVisitor<'src, 'ast> for Walker<'src, '_, '_, D>
 where
     D: DiagCtx,
     'src: 'ast,
 {
-    fn visit_ty_path(&mut self, ty: &'ast mut TyPath<'src>) {
+    fn visit_ty_path(&mut self, ty: &'ast TyPath<'src>) {
         self.result =
             self.result
-                .and(self.resolve_path(Namespace::Ty, self.current_scope_id, &mut ty.path));
+                .and(self.resolve_path(Namespace::Ty, self.current_scope_id, &ty.path));
     }
 
-    fn visit_path(&mut self, expr: &'ast mut ExprPath<'src>) {
-        self.result = self.result.and(self.resolve_path(
-            Namespace::Value,
-            self.current_scope_id,
-            &mut expr.path,
-        ));
+    fn visit_expr_path(&mut self, expr: &'ast ExprPath<'src>) {
+        self.result =
+            self.result
+                .and(self.resolve_path(Namespace::Value, self.current_scope_id, &expr.path));
     }
 }

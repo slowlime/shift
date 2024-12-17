@@ -6,22 +6,20 @@ mod typeck;
 use std::collections::HashMap;
 use std::fmt::{self, Display};
 
-use slotmap::{new_key_type, SlotMap};
+use slotmap::{new_key_type, SlotMap, SparseSecondaryMap};
 
-use crate::ast::{Decl, Loc};
+use crate::ast::{
+    BindingId, Decl, DeclId, Expr, ExprId, Loc, Path, PathId, Stmt, StmtId, Ty, TyId,
+};
 use crate::diag::DiagCtx;
 
 pub use decl_dep_graph::DepGraph;
 pub use resolve::Res;
 
 new_key_type! {
-    pub struct DeclId;
-    pub struct TyId;
+    pub struct TyDefId;
     pub struct TyNsId;
-    pub struct ExprId;
-    pub struct StmtId;
     pub struct ScopeId;
-    pub struct BindingId;
 }
 
 pub type Result<T = ()> = std::result::Result<T, ()>;
@@ -46,16 +44,16 @@ impl Scope {
 #[derive(Debug, Clone)]
 pub struct TyNs<'a> {
     pub loc: Loc<'a>,
-    pub ty_id: TyId,
+    pub ty_def_id: TyDefId,
     pub scope_id: ScopeId,
 }
 
 #[derive(Debug, Clone)]
-pub struct Binding<'a> {
-    pub ty_id: TyId,
+pub struct BindingInfo<'a> {
+    pub ty_def_id: TyDefId,
     pub loc: Loc<'a>,
     pub name: String,
-    pub kind: BindingKind,
+    pub kind: Option<BindingKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,20 +71,20 @@ pub enum TyDef {
     Bool,
     Error,
     Range(i64, i64),
-    Array(TyId, usize),
+    Array(TyDefId, usize),
     Enum(DeclId),
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct PrimitiveTys {
-    pub int: TyId,
-    pub bool: TyId,
-    pub error: TyId,
+    pub int: TyDefId,
+    pub bool: TyDefId,
+    pub error: TyDefId,
 }
 
 #[derive(Debug, Clone)]
 pub struct StmtInfo<'a> {
-    pub loc: Loc<'a>,
+    pub def: &'a Stmt<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,86 +113,104 @@ impl ConstValue {
 
 #[derive(Debug, Clone)]
 pub struct ExprInfo<'a> {
-    pub loc: Loc<'a>,
-    pub ty_id: TyId,
+    pub def: &'a Expr<'a>,
+    pub ty_def_id: TyDefId,
     pub value: Option<ConstValue>,
     pub constant: Option<bool>,
     pub assignable: Option<bool>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DeclInfo<'a> {
+    pub def: &'a Decl<'a>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TyInfo<'a> {
+    pub def: &'a Ty<'a>,
+    pub ty_def_id: TyDefId,
+}
+
+#[derive(Debug, Clone)]
+pub struct PathInfo<'a> {
+    pub def: &'a Path<'a>,
+    pub res: Option<Res>,
+}
+
 pub struct Module<'a> {
-    pub decls: SlotMap<DeclId, Decl<'a>>,
-    pub scopes: SlotMap<ScopeId, Scope>, // initialized by resolve
-    pub bindings: SlotMap<BindingId, Binding<'a>>, // initialized by resolve
-    pub ty_ns: SlotMap<TyNsId, TyNs<'a>>, // initialized by resolve
+    pub decls: SlotMap<DeclId, DeclInfo<'a>>, // initialized by load_ast
     pub stmts: SlotMap<StmtId, StmtInfo<'a>>, // initialized by load_ast
     pub exprs: SlotMap<ExprId, ExprInfo<'a>>, // initialized by load_ast
-    pub ty_defs: SlotMap<TyId, TyDef>,   // initialized by typeck
-    pub primitive_tys: PrimitiveTys,     // initialized by typeck
-    range_tys: HashMap<(i64, i64), TyId>,
-    array_tys: HashMap<(TyId, usize), TyId>,
-    pub root_scope_id: ScopeId, // initialized by resolve
-    pub trans_decl_id: DeclId,  // initialized by load_ast
+    pub tys: SlotMap<TyId, TyInfo<'a>>,       // initialized by load_ast
+    pub paths: SlotMap<PathId, PathInfo<'a>>, // initialized by load_ast
+    pub bindings: SlotMap<BindingId, BindingInfo<'a>>, // initialized by load_ast
+    pub trans_decl_id: DeclId,                // initialized by load_ast
+    pub scopes: SlotMap<ScopeId, Scope>,      // initialized by resolve
+    pub root_scope_id: ScopeId,               // initialized by resolve
+    pub ty_ns: SlotMap<TyNsId, TyNs<'a>>,     // initialized by resolve
+    pub decl_ty_ns: SparseSecondaryMap<DeclId, TyNsId>, // initialized by resolve
+    pub ty_defs: SlotMap<TyDefId, TyDef>,     // initialized by typeck
+    pub primitive_tys: PrimitiveTys,          // initialized by typeck
+    range_tys: HashMap<(i64, i64), TyDefId>,
+    array_tys: HashMap<(TyDefId, usize), TyDefId>,
 }
 
 impl<'a> Module<'a> {
-    fn new(decls: Vec<Decl<'a>>) -> Self {
-        let mut decl_map = SlotMap::with_key();
-
-        for decl in decls {
-            decl_map.insert(decl);
-        }
-
+    fn new() -> Self {
         Self {
-            decls: decl_map,
-            scopes: Default::default(),
-            bindings: Default::default(),
-            ty_ns: Default::default(),
+            decls: Default::default(),
             stmts: Default::default(),
             exprs: Default::default(),
+            tys: Default::default(),
+            paths: Default::default(),
+            bindings: Default::default(),
+            trans_decl_id: Default::default(),
+            scopes: Default::default(),
+            root_scope_id: Default::default(),
+            ty_ns: Default::default(),
+            decl_ty_ns: Default::default(),
             ty_defs: Default::default(),
             primitive_tys: Default::default(),
             range_tys: Default::default(),
             array_tys: Default::default(),
-            root_scope_id: Default::default(),
-            trans_decl_id: Default::default(),
         }
     }
 
-    pub fn display_ty(&self, ty_id: TyId) -> impl Display + '_ {
+    pub fn display_ty(&self, ty_def_id: TyDefId) -> impl Display + '_ {
         struct Fmt<'a> {
             m: &'a Module<'a>,
-            ty_id: TyId,
+            ty_def_id: TyDefId,
         }
 
         impl Display for Fmt<'_> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                match self.m.ty_defs[self.ty_id] {
+                match self.m.ty_defs[self.ty_def_id] {
                     TyDef::Int => write!(f, "int"),
                     TyDef::Bool => write!(f, "bool"),
                     TyDef::Error => write!(f, "<error>"),
                     TyDef::Range(lo, hi) => write!(f, "{lo}..{hi}"),
-                    TyDef::Array(ty_id, len) => write!(f, "[{}; {len}]", self.m.display_ty(ty_id)),
-                    TyDef::Enum(decl_id) => write!(f, "{}", self.m.decls[decl_id].name()),
+                    TyDef::Array(ty_def_id, len) => {
+                        write!(f, "[{}; {len}]", self.m.display_ty(ty_def_id))
+                    }
+                    TyDef::Enum(decl_id) => write!(f, "{}", self.m.decls[decl_id].def.name()),
                 }
             }
         }
 
-        Fmt { m: self, ty_id }
+        Fmt { m: self, ty_def_id }
     }
 }
 
-pub fn process<'a>(decls: Vec<Decl<'a>>, diag: &mut impl DiagCtx) -> (Module<'a>, Result) {
-    let mut module = Module::new(decls);
-
-    let result = (|| {
-        module.load_ast(diag)?;
+pub fn process<'a>(decls: &'a mut [Decl<'a>], diag: &mut impl DiagCtx) -> (Module<'a>, Result) {
+    let mut module = Module::new();
+    let result = module.load_ast(diag, decls);
+    let result = result.and_then(|_| {
         module.resolve(diag)?;
         let decl_deps = module.decl_dep_graph(diag)?;
         module.typeck(diag, &decl_deps)?;
 
         Ok(())
-    })();
+    });
 
     (module, result)
 }

@@ -1,10 +1,9 @@
 use std::collections::HashMap;
-use std::mem;
 
 use slotmap::SecondaryMap;
 
 use crate::ast::visit::{DefaultDeclVisitor, DefaultStmtVisitor, DefaultVisitor};
-use crate::ast::ExprPath;
+use crate::ast::{ExprPath, HasLoc};
 use crate::diag::DiagCtx;
 
 use super::{BindingKind, DeclId, ExprId, Module, Res, Result};
@@ -21,14 +20,14 @@ impl Module<'_> {
     }
 }
 
-struct Pass<'src, 'm, 'd, D> {
+struct Pass<'src, 'm, D> {
     m: &'m mut Module<'src>,
-    diag: &'d mut D,
+    diag: &'m mut D,
     dep: DepGraph,
 }
 
-impl<'src, 'm, 'd, D: DiagCtx> Pass<'src, 'm, 'd, D> {
-    fn new(m: &'m mut Module<'src>, diag: &'d mut D) -> Self {
+impl<'src, 'm, D: DiagCtx> Pass<'src, 'm, D> {
+    fn new(m: &'m mut Module<'src>, diag: &'m mut D) -> Self {
         Self {
             m,
             diag,
@@ -47,13 +46,12 @@ impl<'src, 'm, 'd, D: DiagCtx> Pass<'src, 'm, 'd, D> {
         let decl_ids = self.m.decls.keys().collect::<Vec<_>>();
 
         for decl_id in decl_ids {
-            let decl = mem::take(&mut self.m.decls[decl_id]);
+            let decl = self.m.decls[decl_id].def;
             let mut walker = Walker {
                 pass: self,
                 decl_id,
             };
-            walker.visit_decl(&decl);
-            self.m.decls[decl_id] = decl;
+            walker.visit_decl(decl);
         }
     }
 
@@ -93,10 +91,10 @@ impl<'src, 'm, 'd, D: DiagCtx> Pass<'src, 'm, 'd, D> {
                 if let Some((&dep_decl_id, &expr_id)) = iter.next() {
                     match state.get(dep_decl_id).copied() {
                         Some(State::Discovered) => {
-                            let decl_name = self.m.decls[decl_id].name();
-                            let dep_decl_name = self.m.decls[dep_decl_id].name();
+                            let decl_name = self.m.decls[decl_id].def.name();
+                            let dep_decl_name = self.m.decls[dep_decl_id].def.name();
                             self.diag.err_at(
-                                self.m.exprs[expr_id].loc,
+                                self.m.exprs[expr_id].def.loc(),
                                 format!(
                                     "found a cyclic dependency between `{}` and `{}`",
                                     decl_name, dep_decl_name,
@@ -131,12 +129,12 @@ impl<'src, 'm, 'd, D: DiagCtx> Pass<'src, 'm, 'd, D> {
     }
 }
 
-struct Walker<'src, 'm, 'd, 'p, D> {
-    pass: &'p mut Pass<'src, 'm, 'd, D>,
+struct Walker<'src, 'm, 'p, D> {
+    pass: &'p mut Pass<'src, 'm, D>,
     decl_id: DeclId,
 }
 
-impl<D> Walker<'_, '_, '_, '_, D> {
+impl<D> Walker<'_, '_, '_, D> {
     fn add_dep(&mut self, decl_id: DeclId, expr_id: ExprId) {
         self.pass
             .dep
@@ -148,28 +146,28 @@ impl<D> Walker<'_, '_, '_, '_, D> {
     }
 }
 
-impl<'src, 'ast, D> DefaultDeclVisitor<'src, 'ast> for Walker<'src, '_, '_, '_, D>
+impl<'src, 'ast, D> DefaultDeclVisitor<'src, 'ast> for Walker<'src, '_, '_, D>
 where
     D: DiagCtx,
     'src: 'ast,
 {
 }
 
-impl<'src, 'ast, D> DefaultStmtVisitor<'src, 'ast> for Walker<'src, '_, '_, '_, D>
+impl<'src, 'ast, D> DefaultStmtVisitor<'src, 'ast> for Walker<'src, '_, '_, D>
 where
     D: DiagCtx,
     'src: 'ast,
 {
 }
 
-impl<'src, 'ast, D> DefaultVisitor<'src, 'ast> for Walker<'src, '_, '_, '_, D>
+impl<'src, 'ast, D> DefaultVisitor<'src, 'ast> for Walker<'src, '_, '_, D>
 where
     D: DiagCtx,
     'src: 'ast,
 {
-    fn visit_path(&mut self, expr: &'ast ExprPath<'src>) {
-        if let Res::Binding(binding_id) = expr.path.res.unwrap() {
-            match self.pass.m.bindings[binding_id].kind {
+    fn visit_expr_path(&mut self, expr: &'ast ExprPath<'src>) {
+        if let Res::Binding(binding_id) = self.pass.m.paths[expr.path.id].res.unwrap() {
+            match *self.pass.m.bindings[binding_id].kind.as_ref().unwrap() {
                 BindingKind::Const(decl_id) => self.add_dep(decl_id, expr.id),
                 BindingKind::Var(decl_id) => self.add_dep(decl_id, expr.id),
                 BindingKind::ConstFor(..) => {}

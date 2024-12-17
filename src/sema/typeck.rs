@@ -1,19 +1,18 @@
 use std::cmp::Ordering;
-use std::mem;
 
-use slotmap::{Key, SlotMap, SparseSecondaryMap};
+use slotmap::{Key, SlotMap};
 
 use crate::ast::{
     BinOp, Block, Builtin, Decl, DeclConst, DeclEnum, DeclTrans, DeclVar, DefaultingVar, Else,
     Expr, ExprArrayRepeat, ExprBinary, ExprBool, ExprFunc, ExprIndex, ExprInt, ExprPath, ExprUnary,
-    HasLoc, Loc, Stmt, StmtAlias, StmtAssignNext, StmtConstFor, StmtDefaulting, StmtEither, StmtIf,
-    StmtMatch, Ty, TyArray, TyBool, TyInt, TyPath, TyRange, UnOp,
+    HasLoc, Loc, PathId, Stmt, StmtAlias, StmtAssignNext, StmtConstFor, StmtDefaulting, StmtEither,
+    StmtIf, StmtMatch, Ty, TyArray, TyBool, TyInt, TyPath, TyRange, UnOp,
 };
 use crate::diag::{self, Diag, DiagCtx, Note};
 
 use super::{
-    Binding, BindingId, BindingKind, ConstValue, DeclId, DepGraph, ExprId, ExprInfo, Module,
-    Result, StmtId, TyDef, TyId,
+    BindingId, BindingInfo, BindingKind, ConstValue, DeclId, DeclInfo, DepGraph, ExprId, ExprInfo,
+    Module, PathInfo, Result, StmtId, StmtInfo, TyDef, TyDefId,
 };
 
 impl Module<'_> {
@@ -27,21 +26,15 @@ struct AliasInfo<'src> {
     binding_id: BindingId,
 }
 
-struct Pass<'src, 'm, 'd, 'dep, D> {
+struct Pass<'src, 'm, D> {
     m: &'m mut Module<'src>,
-    diag: &'d mut D,
-    decl_deps: &'dep DepGraph,
-    aliases: SparseSecondaryMap<StmtId, AliasInfo<'src>>,
+    diag: &'m mut D,
+    decl_deps: &'m DepGraph,
 }
 
-impl<'src, 'm, 'd, 'dep, D: DiagCtx> Pass<'src, 'm, 'd, 'dep, D> {
-    fn new(m: &'m mut Module<'src>, diag: &'d mut D, decl_deps: &'dep DepGraph) -> Self {
-        Self {
-            m,
-            diag,
-            decl_deps,
-            aliases: Default::default(),
-        }
+impl<'src, 'm, D: DiagCtx> Pass<'src, 'm, D> {
+    fn new(m: &'m mut Module<'src>, diag: &'m mut D, decl_deps: &'m DepGraph) -> Self {
+        Self { m, diag, decl_deps }
     }
 
     fn run(mut self) -> Result {
@@ -51,7 +44,7 @@ impl<'src, 'm, 'd, 'dep, D: DiagCtx> Pass<'src, 'm, 'd, 'dep, D> {
         Ok(())
     }
 
-    fn add_ty(&mut self, ty_def: TyDef) -> TyId {
+    fn add_ty(&mut self, ty_def: TyDef) -> TyDefId {
         match ty_def {
             TyDef::Int => {
                 if self.m.primitive_tys.int.is_null() {
@@ -83,19 +76,19 @@ impl<'src, 'm, 'd, 'dep, D: DiagCtx> Pass<'src, 'm, 'd, 'dep, D> {
                 .entry((lo, hi))
                 .or_insert_with(|| self.m.ty_defs.insert(ty_def)),
 
-            TyDef::Array(ty_id, len) => *self
+            TyDef::Array(ty_def_id, len) => *self
                 .m
                 .array_tys
-                .entry((ty_id, len))
+                .entry((ty_def_id, len))
                 .or_insert_with(|| self.m.ty_defs.insert(ty_def)),
 
             TyDef::Enum(decl_id) => {
-                let ty_id = self.m.ty_ns[self.m.decls[decl_id].as_enum().ty_ns_id].ty_id;
+                let ty_def_id = self.m.ty_ns[self.m.decl_ty_ns[decl_id]].ty_def_id;
 
-                if ty_id.is_null() {
+                if ty_def_id.is_null() {
                     self.m.ty_defs.insert(ty_def)
                 } else {
-                    ty_id
+                    ty_def_id
                 }
             }
         }
@@ -112,118 +105,139 @@ impl<'src, 'm, 'd, 'dep, D: DiagCtx> Pass<'src, 'm, 'd, 'dep, D> {
 
         for idx in 0..self.decl_deps.order.len() {
             let decl_id = self.decl_deps.order[idx];
-            let mut decl = mem::take(&mut self.m.decls[decl_id]);
-            result = result.and(self.typeck_decl(&mut decl, decl_id));
-            self.m.decls[decl_id] = decl;
+            result = result.and(self.typeck_decl(self.m.decls[decl_id].def));
         }
 
         result
     }
 
-    fn emit_ty_mismatch(&mut self, loc: Loc<'src>, expected_ty_id: TyId, actual_ty_id: TyId) {
+    fn emit_ty_mismatch(
+        &mut self,
+        loc: Loc<'src>,
+        expected_ty_def_id: TyDefId,
+        actual_ty_def_id: TyDefId,
+    ) {
         self.diag.err_at(
             loc,
             format!(
                 "type mismatch: expected {}, got {}",
-                self.m.display_ty(expected_ty_id),
-                self.m.display_ty(actual_ty_id),
+                self.m.display_ty(expected_ty_def_id),
+                self.m.display_ty(actual_ty_def_id),
             ),
         );
     }
 
-    fn is_error_ty(&self, ty_id: TyId) -> bool {
-        ty_id == self.m.primitive_tys.error
+    fn is_error_ty(&self, ty_def_id: TyDefId) -> bool {
+        ty_def_id == self.m.primitive_tys.error
     }
 
-    fn ty_conforms_to(&self, ty_id: TyId, expected_ty_id: TyId) -> bool {
-        if self.is_error_ty(ty_id) || self.is_error_ty(expected_ty_id) {
+    fn ty_conforms_to(&self, ty_def_id: TyDefId, expected_ty_def_id: TyDefId) -> bool {
+        if self.is_error_ty(ty_def_id) || self.is_error_ty(expected_ty_def_id) {
             return true;
         }
 
-        ty_id == expected_ty_id
+        ty_def_id == expected_ty_def_id
     }
 
-    fn check_ty(&mut self, loc: Loc<'src>, expected_ty_id: TyId, actual_ty_id: TyId) -> Result {
-        if self.ty_conforms_to(actual_ty_id, expected_ty_id) {
+    fn check_ty(
+        &mut self,
+        loc: Loc<'src>,
+        expected_ty_def_id: TyDefId,
+        actual_ty_def_id: TyDefId,
+    ) -> Result {
+        if self.ty_conforms_to(actual_ty_def_id, expected_ty_def_id) {
             Ok(())
         } else {
-            self.emit_ty_mismatch(loc, expected_ty_id, actual_ty_id);
+            self.emit_ty_mismatch(loc, expected_ty_def_id, actual_ty_def_id);
 
             Err(())
         }
     }
 
-    fn ty_join(&self, lhs_ty_id: TyId, rhs_ty_id: TyId) -> Option<TyId> {
-        match (&self.m.ty_defs[lhs_ty_id], &self.m.ty_defs[rhs_ty_id]) {
-            _ if lhs_ty_id == rhs_ty_id => Some(lhs_ty_id),
+    fn ty_join(&self, lhs_ty_def_id: TyDefId, rhs_ty_def_id: TyDefId) -> Option<TyDefId> {
+        match (
+            &self.m.ty_defs[lhs_ty_def_id],
+            &self.m.ty_defs[rhs_ty_def_id],
+        ) {
+            _ if lhs_ty_def_id == rhs_ty_def_id => Some(lhs_ty_def_id),
             (TyDef::Error, _) | (_, TyDef::Error) => Some(self.m.primitive_tys.error),
             _ => None,
         }
     }
 
-    fn set_expr_info(&mut self, expr_id: ExprId, ty_id: TyId, constant: bool, assignable: bool) {
+    fn set_expr_info(
+        &mut self,
+        expr_id: ExprId,
+        ty_def_id: TyDefId,
+        constant: bool,
+        assignable: bool,
+    ) {
         let expr_info = &mut self.m.exprs[expr_id];
-        expr_info.ty_id = ty_id;
+        expr_info.ty_def_id = ty_def_id;
         expr_info.constant = Some(constant);
         expr_info.assignable = Some(assignable);
     }
 }
 
 // Type-checking.
-impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
-    fn typeck_decl(&mut self, decl: &mut Decl<'src>, decl_id: DeclId) -> Result {
+impl<'src, D: DiagCtx> Pass<'src, '_, D> {
+    fn typeck_decl(&mut self, decl: &Decl<'src>) -> Result {
         match decl {
             Decl::Dummy => panic!("encountered a dummy decl"),
             Decl::Const(decl) => self.typeck_decl_const(decl),
-            Decl::Enum(decl) => self.typeck_decl_enum(decl, decl_id),
+            Decl::Enum(decl) => self.typeck_decl_enum(decl),
             Decl::Var(decl) => self.typeck_decl_var(decl),
             Decl::Trans(decl) => self.typeck_decl_trans(decl),
         }
     }
 
-    fn typeck_decl_const(&mut self, decl: &mut DeclConst<'src>) -> Result {
-        let result = self.typeck_expr(&mut decl.expr);
-        let ty_id = self.m.exprs[decl.expr.id()].ty_id;
-        self.m.bindings[decl.binding_id].ty_id = ty_id;
+    fn typeck_decl_const(&mut self, decl: &DeclConst<'src>) -> Result {
+        let result = self.typeck_expr(&decl.expr);
+        let ty_def_id = self.m.exprs[decl.expr.id()].ty_def_id;
+        self.m.bindings[decl.binding.id].ty_def_id = ty_def_id;
         result?;
 
-        self.const_eval(&mut decl.expr)?;
+        self.const_eval(&decl.expr)?;
 
         Ok(())
     }
 
-    fn typeck_decl_enum(&mut self, decl: &mut DeclEnum<'src>, decl_id: DeclId) -> Result {
-        let ty_id = self.add_ty(TyDef::Enum(decl_id));
-        self.m.ty_ns[decl.ty_ns_id].ty_id = ty_id;
+    fn typeck_decl_enum(&mut self, decl: &DeclEnum<'src>) -> Result {
+        let ty_def_id = self.add_ty(TyDef::Enum(decl.id));
+        self.m.ty_ns[self.m.decl_ty_ns[decl.id]].ty_def_id = ty_def_id;
 
         for variant in &decl.variants {
-            self.m.bindings[variant.binding_id].ty_id = ty_id;
+            self.m.bindings[variant.binding.id].ty_def_id = ty_def_id;
         }
 
         Ok(())
     }
 
-    fn typeck_decl_var(&mut self, decl: &mut DeclVar<'src>) -> Result {
-        let mut result = self.typeck_ty(&mut decl.ty);
-        self.m.bindings[decl.binding_id].ty_id = decl.ty.ty_id();
+    fn typeck_decl_var(&mut self, decl: &DeclVar<'src>) -> Result {
+        let mut result = self.typeck_ty(&decl.ty);
+        self.m.bindings[decl.binding.id].ty_def_id = self.m.tys[decl.ty.id()].ty_def_id;
 
-        if let Some(expr) = &mut decl.init {
+        if let Some(expr) = &decl.init {
             result = result.and(self.typeck_expr(expr));
-            let actual_ty_id = self.m.exprs[expr.id()].ty_id;
+            let actual_ty_def_id = self.m.exprs[expr.id()].ty_def_id;
 
-            if !self.ty_conforms_to(actual_ty_id, decl.ty.ty_id()) {
-                result = result.and(self.check_ty(expr.loc(), decl.ty.ty_id(), actual_ty_id));
+            if !self.ty_conforms_to(actual_ty_def_id, self.m.tys[decl.ty.id()].ty_def_id) {
+                result = result.and(self.check_ty(
+                    expr.loc(),
+                    self.m.tys[decl.ty.id()].ty_def_id,
+                    actual_ty_def_id,
+                ));
             }
         }
 
         result
     }
 
-    fn typeck_decl_trans(&mut self, decl: &mut DeclTrans<'src>) -> Result {
-        self.typeck_block(&mut decl.body)
+    fn typeck_decl_trans(&mut self, decl: &DeclTrans<'src>) -> Result {
+        self.typeck_block(&decl.body)
     }
 
-    fn typeck_ty(&mut self, ty: &mut Ty<'src>) -> Result {
+    fn typeck_ty(&mut self, ty: &Ty<'src>) -> Result {
         match ty {
             Ty::Dummy => panic!("encountered a dummy type"),
             Ty::Int(ty) => self.typeck_ty_int(ty),
@@ -234,56 +248,56 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
         }
     }
 
-    fn typeck_ty_int(&mut self, ty: &mut TyInt<'src>) -> Result {
-        ty.ty_id = self.m.primitive_tys.int;
+    fn typeck_ty_int(&mut self, ty: &TyInt<'src>) -> Result {
+        self.m.tys[ty.id].ty_def_id = self.m.primitive_tys.int;
 
         Ok(())
     }
 
-    fn typeck_ty_bool(&mut self, ty: &mut TyBool<'src>) -> Result {
-        ty.ty_id = self.m.primitive_tys.bool;
+    fn typeck_ty_bool(&mut self, ty: &TyBool<'src>) -> Result {
+        self.m.tys[ty.id].ty_def_id = self.m.primitive_tys.bool;
 
         Ok(())
     }
 
-    fn typeck_ty_range(&mut self, ty: &mut TyRange<'src>) -> Result {
-        ty.ty_id = self.m.primitive_tys.error;
-        let mut result = self.typeck_expr(&mut ty.lo);
+    fn typeck_ty_range(&mut self, ty: &TyRange<'src>) -> Result {
+        self.m.tys[ty.id].ty_def_id = self.m.primitive_tys.error;
+        let mut result = self.typeck_expr(&ty.lo);
         result = result.and(self.check_ty(
             ty.lo.loc(),
             self.m.primitive_tys.int,
-            self.m.exprs[ty.lo.id()].ty_id,
+            self.m.exprs[ty.lo.id()].ty_def_id,
         ));
-        result = result.and(self.typeck_expr(&mut ty.hi));
+        result = result.and(self.typeck_expr(&ty.hi));
         result = result.and(self.check_ty(
             ty.hi.loc(),
             self.m.primitive_tys.int,
-            self.m.exprs[ty.hi.id()].ty_id,
+            self.m.exprs[ty.hi.id()].ty_def_id,
         ));
         result?;
 
-        self.const_eval(&mut ty.lo)?;
-        self.const_eval(&mut ty.hi)?;
+        self.const_eval(&ty.lo)?;
+        self.const_eval(&ty.hi)?;
 
         let lo = self.m.exprs[ty.lo.id()].value.as_ref().ok_or(())?.to_int();
         let hi = self.m.exprs[ty.hi.id()].value.as_ref().ok_or(())?.to_int();
-        ty.ty_id = self.add_ty(TyDef::Range(lo, hi));
+        self.m.tys[ty.id].ty_def_id = self.add_ty(TyDef::Range(lo, hi));
 
         Ok(())
     }
 
-    fn typeck_ty_array(&mut self, ty: &mut TyArray<'src>) -> Result {
-        ty.ty_id = self.m.primitive_tys.error;
-        let mut result = self.typeck_ty(&mut ty.elem);
-        result = result.and(self.typeck_expr(&mut ty.len));
+    fn typeck_ty_array(&mut self, ty: &TyArray<'src>) -> Result {
+        self.m.tys[ty.id].ty_def_id = self.m.primitive_tys.error;
+        let mut result = self.typeck_ty(&ty.elem);
+        result = result.and(self.typeck_expr(&ty.len));
         result = result.and(self.check_ty(
             ty.len.loc(),
             self.m.primitive_tys.int,
-            self.m.exprs[ty.len.id()].ty_id,
+            self.m.exprs[ty.len.id()].ty_def_id,
         ));
         result?;
 
-        self.const_eval(&mut ty.len)?;
+        self.const_eval(&ty.len)?;
 
         let len = self.m.exprs[ty.len.id()].value.as_ref().ok_or(())?.to_int();
         let len = match usize::try_from(len) {
@@ -295,31 +309,33 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
             }
         };
 
-        ty.ty_id = self.add_ty(TyDef::Array(ty.elem.ty_id(), len));
+        self.m.tys[ty.id].ty_def_id =
+            self.add_ty(TyDef::Array(self.m.tys[ty.elem.id()].ty_def_id, len));
 
         Ok(())
     }
 
-    fn typeck_ty_path(&mut self, ty: &mut TyPath<'src>) -> Result {
-        let ty_ns_id = ty.path.res.unwrap().into_ty_ns_id();
-        ty.ty_id = self.m.ty_ns[ty_ns_id].ty_id;
+    fn typeck_ty_path(&mut self, ty: &TyPath<'src>) -> Result {
+        let ty_ns_id = self.m.paths[ty.path.id].res.unwrap().into_ty_ns_id();
+        let ty_def_id = self.m.ty_ns[ty_ns_id].ty_def_id;
+        self.m.tys[ty.id].ty_def_id = ty_def_id;
 
-        if self.is_error_ty(ty.ty_id) {
+        if self.is_error_ty(ty_def_id) {
             return Err(());
         }
 
         Ok(())
     }
 
-    fn typeck_block(&mut self, block: &mut Block<'src>) -> Result {
+    fn typeck_block(&mut self, block: &Block<'src>) -> Result {
         #[allow(clippy::manual_try_fold, reason = "short-circuiting is undesirable")]
         block
             .stmts
-            .iter_mut()
+            .iter()
             .fold(Ok(()), |r, stmt| r.and(self.typeck_stmt(stmt)))
     }
 
-    fn typeck_stmt(&mut self, stmt: &mut Stmt<'src>) -> Result {
+    fn typeck_stmt(&mut self, stmt: &Stmt<'src>) -> Result {
         match stmt {
             Stmt::Dummy => panic!("encountered a dummy statement"),
             Stmt::ConstFor(stmt) => self.typeck_stmt_const_for(stmt),
@@ -332,65 +348,58 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
         }
     }
 
-    fn typeck_stmt_const_for(&mut self, stmt: &mut StmtConstFor<'src>) -> Result {
-        self.m.bindings[stmt.binding_id].ty_id = self.m.primitive_tys.int;
-        let mut result = self.typeck_expr(&mut stmt.lo);
+    fn typeck_stmt_const_for(&mut self, stmt: &StmtConstFor<'src>) -> Result {
+        self.m.bindings[stmt.binding.id].ty_def_id = self.m.primitive_tys.int;
+        let mut result = self.typeck_expr(&stmt.lo);
         result = result.and(self.check_ty(
             stmt.lo.loc(),
             self.m.primitive_tys.int,
-            self.m.exprs[stmt.lo.id()].ty_id,
+            self.m.exprs[stmt.lo.id()].ty_def_id,
         ));
-        result = result.and(self.typeck_expr(&mut stmt.hi));
+        result = result.and(self.typeck_expr(&stmt.hi));
         result = result.and(self.check_ty(
             stmt.hi.loc(),
             self.m.primitive_tys.int,
-            self.m.exprs[stmt.hi.id()].ty_id,
+            self.m.exprs[stmt.hi.id()].ty_def_id,
         ));
         result = result.and_then(|_| self.check_const(&stmt.lo).and(self.check_const(&stmt.hi)));
-        result = result.and(self.typeck_block(&mut stmt.body));
+        result = result.and(self.typeck_block(&stmt.body));
 
         result
     }
 
-    fn typeck_stmt_defaulting(&mut self, stmt: &mut StmtDefaulting<'src>) -> Result {
+    fn typeck_stmt_defaulting(&mut self, stmt: &StmtDefaulting<'src>) -> Result {
         let mut result = Ok(());
 
-        for var in &mut stmt.vars {
+        for var in &stmt.vars {
             result = result.and(match var {
                 DefaultingVar::Var(_) => Ok(()),
                 DefaultingVar::Alias(stmt) => self.typeck_stmt_alias(stmt),
             });
         }
 
-        result = result.and(self.typeck_block(&mut stmt.body));
+        result = result.and(self.typeck_block(&stmt.body));
 
         result
     }
 
-    fn typeck_stmt_alias(&mut self, stmt: &mut StmtAlias<'src>) -> Result {
-        let result = self.typeck_expr(&mut stmt.expr);
-        self.m.bindings[stmt.binding_id].ty_id = self.m.exprs[stmt.expr.id()].ty_id;
-        self.aliases.insert(
-            stmt.id,
-            AliasInfo {
-                def: stmt.expr.clone(), // HACK: figure out a less memory-intensive way to do this.
-                binding_id: stmt.binding_id,
-            },
-        );
+    fn typeck_stmt_alias(&mut self, stmt: &StmtAlias<'src>) -> Result {
+        let result = self.typeck_expr(&stmt.expr);
+        self.m.bindings[stmt.binding.id].ty_def_id = self.m.exprs[stmt.expr.id()].ty_def_id;
 
         result
     }
 
-    fn typeck_stmt_if(&mut self, stmt: &mut StmtIf<'src>) -> Result {
-        let mut result = self.typeck_expr(&mut stmt.cond);
+    fn typeck_stmt_if(&mut self, stmt: &StmtIf<'src>) -> Result {
+        let mut result = self.typeck_expr(&stmt.cond);
         result = result.and(self.check_ty(
             stmt.cond.loc(),
             self.m.primitive_tys.bool,
-            self.m.exprs[stmt.cond.id()].ty_id,
+            self.m.exprs[stmt.cond.id()].ty_def_id,
         ));
-        result = result.and(self.typeck_block(&mut stmt.then_branch));
+        result = result.and(self.typeck_block(&stmt.then_branch));
 
-        if let Some(else_branch) = &mut stmt.else_branch {
+        if let Some(else_branch) = &stmt.else_branch {
             result = result.and(match else_branch {
                 Else::If(else_if) => self.typeck_stmt_if(else_if),
                 Else::Block(else_branch) => self.typeck_block(else_branch),
@@ -400,48 +409,48 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
         result
     }
 
-    fn typeck_stmt_match(&mut self, stmt: &mut StmtMatch<'src>) -> Result {
-        let mut result = self.typeck_expr(&mut stmt.scrutinee);
-        let scrutinee_ty_id = self.m.exprs[stmt.scrutinee.id()].ty_id;
+    fn typeck_stmt_match(&mut self, stmt: &StmtMatch<'src>) -> Result {
+        let mut result = self.typeck_expr(&stmt.scrutinee);
+        let scrutinee_ty_def_id = self.m.exprs[stmt.scrutinee.id()].ty_def_id;
 
-        for arm in &mut stmt.arms {
-            result = result.and(self.typeck_expr(&mut arm.expr));
+        for arm in &stmt.arms {
+            result = result.and(self.typeck_expr(&arm.expr));
             result = result.and(self.check_ty(
                 arm.expr.loc(),
-                scrutinee_ty_id,
-                self.m.exprs[arm.expr.id()].ty_id,
+                scrutinee_ty_def_id,
+                self.m.exprs[arm.expr.id()].ty_def_id,
             ));
-            result = result.and(self.typeck_block(&mut arm.body));
+            result = result.and(self.typeck_block(&arm.body));
         }
 
         result
     }
 
-    fn typeck_stmt_assign_next(&mut self, stmt: &mut StmtAssignNext<'src>) -> Result {
-        let mut result = self.typeck_expr(&mut stmt.lhs);
+    fn typeck_stmt_assign_next(&mut self, stmt: &StmtAssignNext<'src>) -> Result {
+        let mut result = self.typeck_expr(&stmt.lhs);
         result = result.and(self.check_assignable(&stmt.lhs));
-        result = result.and(self.typeck_expr(&mut stmt.rhs));
-        let expected_ty_id = self.m.exprs[stmt.lhs.id()].ty_id;
+        result = result.and(self.typeck_expr(&stmt.rhs));
+        let expected_ty_def_id = self.m.exprs[stmt.lhs.id()].ty_def_id;
         result = result.and(self.check_ty(
             stmt.rhs.loc(),
-            expected_ty_id,
-            self.m.exprs[stmt.rhs.id()].ty_id,
+            expected_ty_def_id,
+            self.m.exprs[stmt.rhs.id()].ty_def_id,
         ));
 
         result
     }
 
-    fn typeck_stmt_either(&mut self, stmt: &mut StmtEither<'src>) -> Result {
+    fn typeck_stmt_either(&mut self, stmt: &StmtEither<'src>) -> Result {
         let mut result = Ok(());
 
-        for block in &mut stmt.blocks {
+        for block in &stmt.blocks {
             result = result.and(self.typeck_block(block));
         }
 
         result
     }
 
-    fn typeck_expr(&mut self, expr: &mut Expr<'src>) -> Result {
+    fn typeck_expr(&mut self, expr: &Expr<'src>) -> Result {
         match expr {
             Expr::Dummy => panic!("encountered a dummy expression"),
             Expr::Path(expr) => self.typeck_expr_path(expr),
@@ -455,36 +464,37 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
         }
     }
 
-    fn typeck_expr_path(&mut self, expr: &mut ExprPath<'src>) -> Result {
-        let binding_id = expr.path.res.unwrap().into_binding_id();
+    fn typeck_expr_path(&mut self, expr: &ExprPath<'src>) -> Result {
+        let binding_id = self.m.paths[expr.path.id].res.unwrap().into_binding_id();
         let binding = &self.m.bindings[binding_id];
         let constant = self.is_const_binding(binding_id);
-        self.set_expr_info(expr.id, binding.ty_id, constant, !constant);
+        self.set_expr_info(expr.id, binding.ty_def_id, constant, !constant);
 
         Ok(())
     }
 
-    fn typeck_expr_bool(&mut self, expr: &mut ExprBool<'src>) -> Result {
+    fn typeck_expr_bool(&mut self, expr: &ExprBool<'src>) -> Result {
         self.set_expr_info(expr.id, self.m.primitive_tys.bool, true, false);
 
         Ok(())
     }
 
-    fn typeck_expr_int(&mut self, expr: &mut ExprInt<'src>) -> Result {
+    fn typeck_expr_int(&mut self, expr: &ExprInt<'src>) -> Result {
         self.set_expr_info(expr.id, self.m.primitive_tys.int, true, false);
 
         Ok(())
     }
 
-    fn typeck_expr_array_repeat(&mut self, expr: &mut ExprArrayRepeat<'src>) -> Result {
+    fn typeck_expr_array_repeat(&mut self, expr: &ExprArrayRepeat<'src>) -> Result {
         self.set_expr_info(expr.id, self.m.primitive_tys.error, false, false);
-        let mut result = self.typeck_expr(&mut expr.expr);
-        result = result.and(self.typeck_expr(&mut expr.len));
-        let elem_ty_id = self.m.exprs[expr.len.id()].ty_id;
-        result = result.and(self.check_ty(expr.len.loc(), self.m.primitive_tys.int, elem_ty_id));
+        let mut result = self.typeck_expr(&expr.expr);
+        result = result.and(self.typeck_expr(&expr.len));
+        let elem_ty_def_id = self.m.exprs[expr.len.id()].ty_def_id;
+        result =
+            result.and(self.check_ty(expr.len.loc(), self.m.primitive_tys.int, elem_ty_def_id));
         result?;
 
-        self.const_eval(&mut expr.len)?;
+        self.const_eval(&expr.len)?;
         let len = self.m.exprs[expr.len.id()]
             .value
             .as_ref()
@@ -499,22 +509,22 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
             }
         };
 
-        let ty_id = self.add_ty(TyDef::Array(elem_ty_id, len));
-        self.set_expr_info(expr.id, ty_id, false, false);
+        let ty_def_id = self.add_ty(TyDef::Array(elem_ty_def_id, len));
+        self.set_expr_info(expr.id, ty_def_id, false, false);
 
         Ok(())
     }
 
-    fn typeck_expr_index(&mut self, expr: &mut ExprIndex<'src>) -> Result {
+    fn typeck_expr_index(&mut self, expr: &ExprIndex<'src>) -> Result {
         self.set_expr_info(expr.id, self.m.primitive_tys.error, false, false);
-        let base_result = self.typeck_expr(&mut expr.base);
-        let index_result = self.typeck_expr(&mut expr.index);
-        let base_ty_id = self.m.exprs[expr.base.id()].ty_id;
+        let base_result = self.typeck_expr(&expr.base);
+        let index_result = self.typeck_expr(&expr.index);
+        let base_ty_def_id = self.m.exprs[expr.base.id()].ty_def_id;
 
-        let base_result = base_result.and_then(|_| match self.m.ty_defs[base_ty_id] {
-            TyDef::Array(elem_ty_id, _) => {
+        let base_result = base_result.and_then(|_| match self.m.ty_defs[base_ty_def_id] {
+            TyDef::Array(elem_ty_def_id, _) => {
                 let constant = self.m.exprs[expr.base.id()].constant.unwrap();
-                self.set_expr_info(expr.id, elem_ty_id, constant, !constant);
+                self.set_expr_info(expr.id, elem_ty_def_id, constant, !constant);
 
                 Ok(())
             }
@@ -526,7 +536,7 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
                     expr.base.loc(),
                     format!(
                         "cannot index into `{}`, expected an array type",
-                        self.m.display_ty(base_ty_id),
+                        self.m.display_ty(base_ty_def_id),
                     ),
                 );
 
@@ -537,26 +547,32 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
         base_result.and(index_result)
     }
 
-    fn typeck_expr_binary(&mut self, expr: &mut ExprBinary<'src>) -> Result {
+    fn typeck_expr_binary(&mut self, expr: &ExprBinary<'src>) -> Result {
         self.set_expr_info(expr.id, self.m.primitive_tys.error, false, false);
-        let mut result = self.typeck_expr(&mut expr.lhs);
-        result = result.and(self.typeck_expr(&mut expr.rhs));
+        let mut result = self.typeck_expr(&expr.lhs);
+        result = result.and(self.typeck_expr(&expr.rhs));
 
         let lhs_info = &self.m.exprs[expr.lhs.id()];
         let rhs_info = &self.m.exprs[expr.rhs.id()];
 
-        let lhs_ty_id = lhs_info.ty_id;
-        let rhs_ty_id = rhs_info.ty_id;
+        let lhs_ty_def_id = lhs_info.ty_def_id;
+        let rhs_ty_def_id = rhs_info.ty_def_id;
 
         let lhs_constant = lhs_info.constant.unwrap();
         let rhs_constant = rhs_info.constant.unwrap();
 
         match expr.op {
             BinOp::Add | BinOp::Sub | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                result =
-                    result.and(self.check_ty(expr.lhs.loc(), self.m.primitive_tys.int, lhs_ty_id));
-                result =
-                    result.and(self.check_ty(expr.rhs.loc(), self.m.primitive_tys.int, rhs_ty_id));
+                result = result.and(self.check_ty(
+                    expr.lhs.loc(),
+                    self.m.primitive_tys.int,
+                    lhs_ty_def_id,
+                ));
+                result = result.and(self.check_ty(
+                    expr.rhs.loc(),
+                    self.m.primitive_tys.int,
+                    rhs_ty_def_id,
+                ));
                 self.set_expr_info(
                     expr.id,
                     self.m.primitive_tys.int,
@@ -566,10 +582,16 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
             }
 
             BinOp::And | BinOp::Or => {
-                result =
-                    result.and(self.check_ty(expr.lhs.loc(), self.m.primitive_tys.bool, lhs_ty_id));
-                result =
-                    result.and(self.check_ty(expr.rhs.loc(), self.m.primitive_tys.bool, rhs_ty_id));
+                result = result.and(self.check_ty(
+                    expr.lhs.loc(),
+                    self.m.primitive_tys.bool,
+                    lhs_ty_def_id,
+                ));
+                result = result.and(self.check_ty(
+                    expr.rhs.loc(),
+                    self.m.primitive_tys.bool,
+                    rhs_ty_def_id,
+                ));
                 self.set_expr_info(
                     expr.id,
                     self.m.primitive_tys.bool,
@@ -579,14 +601,14 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
             }
 
             BinOp::Eq | BinOp::Ne => {
-                result = result.and(self.check_eq_comparable(expr.lhs.loc(), lhs_ty_id));
-                result = result.and(self.check_eq_comparable(expr.rhs.loc(), rhs_ty_id));
+                result = result.and(self.check_eq_comparable(expr.lhs.loc(), lhs_ty_def_id));
+                result = result.and(self.check_eq_comparable(expr.rhs.loc(), rhs_ty_def_id));
 
                 let tys_allowed = self
-                    .ty_join(lhs_ty_id, rhs_ty_id)
-                    .map(|ty_id| {
-                        self.ty_conforms_to(lhs_ty_id, ty_id)
-                            && self.ty_conforms_to(rhs_ty_id, ty_id)
+                    .ty_join(lhs_ty_def_id, rhs_ty_def_id)
+                    .map(|ty_def_id| {
+                        self.ty_conforms_to(lhs_ty_def_id, ty_def_id)
+                            && self.ty_conforms_to(rhs_ty_def_id, ty_def_id)
                     })
                     .unwrap_or(false);
 
@@ -595,8 +617,8 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
                         expr.loc,
                         format!(
                             "cannot compare operands of types `{}` and `{}` for equality",
-                            self.m.display_ty(lhs_ty_id),
-                            self.m.display_ty(rhs_ty_id),
+                            self.m.display_ty(lhs_ty_def_id),
+                            self.m.display_ty(rhs_ty_def_id),
                         ),
                     );
                     result = Err(());
@@ -614,10 +636,10 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
         result
     }
 
-    fn typeck_expr_unary(&mut self, expr: &mut ExprUnary<'src>) -> Result {
-        let mut result = self.typeck_expr(&mut expr.expr);
+    fn typeck_expr_unary(&mut self, expr: &ExprUnary<'src>) -> Result {
+        let mut result = self.typeck_expr(&expr.expr);
         let operand_info = &self.m.exprs[expr.expr.id()];
-        let operand_ty_id = operand_info.ty_id;
+        let operand_ty_def_id = operand_info.ty_def_id;
         let operand_constant = operand_info.constant.unwrap();
 
         match expr.op {
@@ -625,7 +647,7 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
                 result = result.and(self.check_ty(
                     expr.expr.loc(),
                     self.m.primitive_tys.int,
-                    operand_ty_id,
+                    operand_ty_def_id,
                 ));
                 self.set_expr_info(expr.id, self.m.primitive_tys.int, operand_constant, false);
             }
@@ -634,7 +656,7 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
                 result = result.and(self.check_ty(
                     expr.expr.loc(),
                     self.m.primitive_tys.bool,
-                    operand_ty_id,
+                    operand_ty_def_id,
                 ));
                 self.set_expr_info(expr.id, self.m.primitive_tys.bool, operand_constant, false);
             }
@@ -643,11 +665,11 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
         result
     }
 
-    fn typeck_expr_func(&mut self, expr: &mut ExprFunc<'src>) -> Result {
+    fn typeck_expr_func(&mut self, expr: &ExprFunc<'src>) -> Result {
         #[allow(clippy::manual_try_fold, reason = "short-circuiting is undesirable")]
         let mut result = expr
             .args
-            .iter_mut()
+            .iter()
             .fold(Ok(()), |r, arg| r.and(self.typeck_expr(arg)));
 
         let expected_arg_tys = match expr.builtin {
@@ -670,7 +692,7 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
 
             Ordering::Equal => {
                 for (expected_arg_ty, arg) in expected_arg_tys.iter().copied().zip(&expr.args) {
-                    let actual_arg_ty = self.m.exprs[arg.id()].ty_id;
+                    let actual_arg_ty = self.m.exprs[arg.id()].ty_def_id;
                     result = result.and(self.check_ty(arg.loc(), expected_arg_ty, actual_arg_ty));
                 }
             }
@@ -701,15 +723,19 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
 }
 
 // Expression properties.
-impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
+impl<'src, D: DiagCtx> Pass<'src, '_, D> {
     fn is_const_binding(&self, binding_id: BindingId) -> bool {
-        match self.m.bindings[binding_id].kind {
+        match *self.m.bindings[binding_id].kind.as_ref().unwrap() {
             BindingKind::Const(_) => true,
             BindingKind::ConstFor(_) => true,
             BindingKind::Var(_) => false,
-            BindingKind::Alias(stmt_id) => self.m.exprs[self.aliases[stmt_id].def.id()]
-                .constant
-                .unwrap(),
+
+            BindingKind::Alias(stmt_id) => {
+                let expr_id = self.m.stmts[stmt_id].def.as_alias().expr.id();
+
+                self.m.exprs[expr_id].constant.unwrap()
+            }
+
             BindingKind::Variant(..) => true,
         }
     }
@@ -736,8 +762,8 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
         }
     }
 
-    fn check_eq_comparable(&mut self, loc: Loc<'src>, ty_id: TyId) -> Result {
-        match self.m.ty_defs[ty_id] {
+    fn check_eq_comparable(&mut self, loc: Loc<'src>, ty_def_id: TyDefId) -> Result {
+        match self.m.ty_defs[ty_def_id] {
             TyDef::Int => Ok(()),
             TyDef::Bool => Ok(()),
             TyDef::Error => Ok(()),
@@ -748,7 +774,7 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
                     loc,
                     format!(
                         "equality operator cannot be applied to expressions of type `{}`",
-                        self.m.display_ty(ty_id)
+                        self.m.display_ty(ty_def_id)
                     ),
                 );
 
@@ -759,17 +785,18 @@ impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
 }
 
 // Constant expression evaluation.
-impl<'src, D: DiagCtx> Pass<'src, '_, '_, '_, D> {
-    fn const_eval(&mut self, expr: &mut Expr<'src>) -> Result {
+impl<'src, D: DiagCtx> Pass<'src, '_, D> {
+    fn const_eval(&mut self, expr: &Expr<'src>) -> Result {
         ConstEvaluator::new(self).eval_expr(expr)
     }
 }
 
 struct ConstEvaluator<'src, 'a, D> {
-    decls: &'a SlotMap<DeclId, Decl<'src>>,
-    bindings: &'a SlotMap<BindingId, Binding<'src>>,
+    decls: &'a SlotMap<DeclId, DeclInfo<'src>>,
+    bindings: &'a SlotMap<BindingId, BindingInfo<'src>>,
     exprs: &'a mut SlotMap<ExprId, ExprInfo<'src>>,
-    aliases: &'a SparseSecondaryMap<StmtId, AliasInfo<'src>>,
+    stmts: &'a SlotMap<StmtId, StmtInfo<'src>>,
+    paths: &'a SlotMap<PathId, PathInfo<'src>>,
     eval_stack: Vec<(Loc<'src>, String)>,
     diag: &'a mut D,
 }
@@ -785,12 +812,13 @@ macro_rules! return_cached_eval {
 }
 
 impl<'src, 'a, D: DiagCtx> ConstEvaluator<'src, 'a, D> {
-    fn new(pass: &'a mut Pass<'src, '_, '_, '_, D>) -> Self {
+    fn new(pass: &'a mut Pass<'src, '_, D>) -> Self {
         Self {
             decls: &pass.m.decls,
             bindings: &pass.m.bindings,
             exprs: &mut pass.m.exprs,
-            aliases: &pass.aliases,
+            stmts: &pass.m.stmts,
+            paths: &pass.m.paths,
             eval_stack: vec![],
             diag: pass.diag,
         }
@@ -831,11 +859,15 @@ impl<'src, 'a, D: DiagCtx> ConstEvaluator<'src, 'a, D> {
         return_cached_eval!(self, expr);
         self.exprs[expr.id].value = Some(ConstValue::Error);
 
-        match self.bindings[expr.path.res.unwrap().into_binding_id()].kind {
+        match *self.bindings[self.paths[expr.path.id].res.unwrap().into_binding_id()]
+            .kind
+            .as_ref()
+            .unwrap()
+        {
             BindingKind::Const(decl_id) => {
-                let decl = &self.decls[decl_id].as_const();
+                let decl = self.decls[decl_id].def.as_const();
                 self.eval_stack
-                    .push((expr.loc(), format!("a constant `{}`", decl.name)));
+                    .push((expr.loc(), format!("a constant `{}`", decl.binding.name)));
                 let result = self.eval_expr(&decl.expr);
                 self.eval_stack.pop();
                 result?;
@@ -863,14 +895,14 @@ impl<'src, 'a, D: DiagCtx> ConstEvaluator<'src, 'a, D> {
             }
 
             BindingKind::Alias(stmt_id) => {
-                let alias_info = &self.aliases[stmt_id];
-                let name = &self.bindings[alias_info.binding_id].name;
+                let stmt = self.stmts[stmt_id].def.as_alias();
+                let name = stmt.binding.name.name.fragment();
                 self.eval_stack
                     .push((expr.loc(), format!("an alias `{name}`")));
-                let result = self.eval_expr(&alias_info.def);
+                let result = self.eval_expr(&stmt.expr);
                 self.eval_stack.pop();
                 result?;
-                self.exprs[expr.id].value = self.exprs[alias_info.def.id()].value.clone();
+                self.exprs[expr.id].value = self.exprs[stmt.expr.id()].value.clone();
 
                 Ok(())
             }

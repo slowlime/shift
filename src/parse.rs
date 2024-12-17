@@ -18,10 +18,11 @@ use nom_supreme::error::ErrorTree;
 use nom_supreme::final_parser::final_parser;
 
 use crate::ast::{
-    Arm, BinOp, Block, Builtin, Decl, DeclConst, DeclEnum, DeclTrans, DeclVar, DefaultingVar, Else,
-    Expr, ExprArrayRepeat, ExprBinary, ExprBool, ExprFunc, ExprIndex, ExprInt, ExprPath, ExprUnary,
-    Name, Path, ResPath, Span, Stmt, StmtAlias, StmtAssignNext, StmtConstFor, StmtDefaulting,
-    StmtEither, StmtIf, StmtMatch, Ty, TyArray, TyBool, TyInt, TyPath, TyRange, UnOp, Variant,
+    Arm, BinOp, Binding, Block, Builtin, Decl, DeclConst, DeclEnum, DeclTrans, DeclVar,
+    DefaultingVar, Else, Expr, ExprArrayRepeat, ExprBinary, ExprBool, ExprFunc, ExprIndex, ExprInt,
+    ExprPath, ExprUnary, Name, Path, Span, Stmt, StmtAlias, StmtAssignNext, StmtConstFor,
+    StmtDefaulting, StmtEither, StmtIf, StmtMatch, Ty, TyArray, TyBool, TyInt, TyPath, TyRange,
+    UnOp, Variant,
 };
 
 type IResult<'a, T, E = ErrorTree<Span<'a>>> = nom::IResult<Span<'a>, T, E>;
@@ -161,17 +162,24 @@ fn decl_const(i: Span<'_>) -> IResult<'_, DeclConst<'_>> {
         leading_ws(terminated(
             consumed(preceded(
                 keyword(Keyword::Const),
-                cut(separated_pair(name, ws_tag("="), expr)),
+                cut(separated_pair(binding, ws_tag("="), expr)),
             )),
             cut(eol),
         )),
-        |(span, (name, expr))| DeclConst {
+        |(span, (binding, expr))| DeclConst {
+            id: Default::default(),
             loc: span.into(),
-            name,
+            binding,
             expr,
-            binding_id: Default::default(),
         },
     )(i)
+}
+
+fn binding(i: Span<'_>) -> IResult<'_, Binding<'_>> {
+    map(name, |name| Binding {
+        id: Default::default(),
+        name,
+    })(i)
 }
 
 fn name(i: Span<'_>) -> IResult<'_, Name<'_>> {
@@ -222,19 +230,16 @@ fn decl_enum(i: Span<'_>) -> IResult<'_, DeclEnum<'_>> {
             cut(eol),
         )),
         |(span, (name, variants))| DeclEnum {
+            id: Default::default(),
             loc: span.into(),
             name,
             variants,
-            ty_ns_id: Default::default(),
         },
     )(i)
 }
 
 fn variant(i: Span<'_>) -> IResult<'_, Variant<'_>> {
-    map(name, |name| Variant {
-        name,
-        binding_id: Default::default(),
-    })(i)
+    map(binding, |binding| Variant { binding })(i)
 }
 
 fn decl_var(i: Span<'_>) -> IResult<'_, DeclVar<'_>> {
@@ -243,19 +248,19 @@ fn decl_var(i: Span<'_>) -> IResult<'_, DeclVar<'_>> {
             consumed(preceded(
                 keyword(Keyword::Var),
                 cut(tuple((
-                    name,
+                    binding,
                     preceded(ws_tag(":"), ty),
                     opt(preceded(ws_tag("="), expr)),
                 ))),
             )),
             cut(eol),
         )),
-        |(span, (name, ty, init))| DeclVar {
+        |(span, (binding, ty, init))| DeclVar {
+            id: Default::default(),
             loc: span.into(),
-            name,
+            binding,
             ty,
             init,
-            binding_id: Default::default(),
         },
     )(i)
 }
@@ -267,6 +272,7 @@ fn decl_trans(i: Span<'_>) -> IResult<'_, DeclTrans<'_>> {
             cut(eol),
         )),
         |(span, body)| DeclTrans {
+            id: Default::default(),
             loc: span.into(),
             body,
         },
@@ -285,7 +291,7 @@ fn ty(i: Span<'_>) -> IResult<'_, Ty<'_>> {
 
 fn ty_int(i: Span<'_>) -> IResult<'_, TyInt<'_>> {
     map(leading_ws(recognize(keyword(Keyword::Int))), |span| TyInt {
-        ty_id: Default::default(),
+        id: Default::default(),
         loc: span.into(),
     })(i)
 }
@@ -293,7 +299,7 @@ fn ty_int(i: Span<'_>) -> IResult<'_, TyInt<'_>> {
 fn ty_bool(i: Span<'_>) -> IResult<'_, TyBool<'_>> {
     map(leading_ws(recognize(keyword(Keyword::Bool))), |span| {
         TyBool {
-            ty_id: Default::default(),
+            id: Default::default(),
             loc: span.into(),
         }
     })(i)
@@ -303,7 +309,7 @@ fn ty_range(i: Span<'_>) -> IResult<'_, TyRange<'_>> {
     map(
         leading_ws(consumed(separated_pair(expr, ws_tag(".."), cut(expr)))),
         |(span, (lo, hi))| TyRange {
-            ty_id: Default::default(),
+            id: Default::default(),
             loc: span.into(),
             lo,
             hi,
@@ -319,7 +325,7 @@ fn ty_array(i: Span<'_>) -> IResult<'_, TyArray<'_>> {
             cut(ws_tag("]")),
         ))),
         |(span, (elem, len))| TyArray {
-            ty_id: Default::default(),
+            id: Default::default(),
             loc: span.into(),
             elem,
             len,
@@ -328,14 +334,10 @@ fn ty_array(i: Span<'_>) -> IResult<'_, TyArray<'_>> {
 }
 
 fn ty_path(i: Span<'_>) -> IResult<'_, TyPath<'_>> {
-    map(res_path, |path| TyPath {
-        ty_id: Default::default(),
+    map(path, |path| TyPath {
+        id: Default::default(),
         path,
     })(i)
-}
-
-fn res_path(i: Span<'_>) -> IResult<'_, ResPath<'_>> {
-    map(path, |path| ResPath { path, res: None })(i)
 }
 
 fn path(i: Span<'_>) -> IResult<'_, Path<'_>> {
@@ -358,6 +360,7 @@ fn path(i: Span<'_>) -> IResult<'_, Path<'_>> {
             segments.insert(0, first_segment);
 
             Path {
+                id: Default::default(),
                 loc: span.into(),
                 absolute,
                 segments,
@@ -398,7 +401,7 @@ fn stmt_const_for(i: Span<'_>) -> IResult<'_, StmtConstFor<'_>> {
                 pair(keyword(Keyword::Const), keyword(Keyword::For)),
                 cut(pair(
                     separated_pair(
-                        name,
+                        binding,
                         keyword(Keyword::In),
                         separated_pair(expr, ws_tag(".."), expr),
                     ),
@@ -407,14 +410,13 @@ fn stmt_const_for(i: Span<'_>) -> IResult<'_, StmtConstFor<'_>> {
             )),
             cut(eol),
         )),
-        |(span, ((var, (lo, hi)), body))| StmtConstFor {
+        |(span, ((binding, (lo, hi)), body))| StmtConstFor {
             id: Default::default(),
             loc: span.into(),
-            var,
+            binding,
             lo,
             hi,
             body,
-            binding_id: Default::default(),
         },
     )(i)
 }
@@ -444,7 +446,7 @@ fn stmt_defaulting(i: Span<'_>) -> IResult<'_, StmtDefaulting<'_>> {
 fn defaulting_var(i: Span<'_>) -> IResult<'_, DefaultingVar<'_>> {
     alt((
         stmt_alias.map(DefaultingVar::Alias),
-        terminated(res_path, cut(eol)).map(DefaultingVar::Var),
+        terminated(path, cut(eol)).map(DefaultingVar::Var),
     ))(i)
 }
 
@@ -453,16 +455,15 @@ fn stmt_alias(i: Span<'_>) -> IResult<'_, StmtAlias<'_>> {
         leading_ws(terminated(
             consumed(preceded(
                 keyword(Keyword::Alias),
-                cut(separated_pair(name, ws_tag("="), expr)),
+                cut(separated_pair(binding, ws_tag("="), expr)),
             )),
             cut(eol),
         )),
-        |(span, (name, expr))| StmtAlias {
+        |(span, (binding, expr))| StmtAlias {
             id: Default::default(),
             loc: span.into(),
-            name,
+            binding,
             expr,
-            binding_id: Default::default(),
         },
     )(i)
 }
@@ -858,7 +859,7 @@ fn expr_func(i: Span<'_>) -> IResult<'_, ExprFunc<'_>> {
 }
 
 fn expr_path(i: Span<'_>) -> IResult<'_, ExprPath<'_>> {
-    map(res_path, |path| ExprPath {
+    map(path, |path| ExprPath {
         id: Default::default(),
         path,
     })(i)

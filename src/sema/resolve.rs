@@ -6,8 +6,8 @@ use crate::ast::visit::{
     DeclRecurse, DefaultDeclVisitor, DefaultVisitor, StmtRecurse, StmtVisitor,
 };
 use crate::ast::{
-    Binding, Decl, DeclTrans, DefaultingVar, Else, ExprPath, HasLoc, Name, Path, Stmt, StmtAlias,
-    StmtAssignNext, StmtConstFor, StmtDefaulting, StmtEither, StmtIf, StmtMatch, TyPath,
+    Binding, Decl, DeclTrans, Else, ExprPath, HasLoc, Name, Path, Stmt, StmtAlias, StmtAssignNext,
+    StmtConstFor, StmtDefaulting, StmtEither, StmtIf, StmtMatch, TyPath,
 };
 use crate::diag::DiagCtx;
 
@@ -363,19 +363,7 @@ where
         let prev_scope_id = self.enter_scope();
 
         for var in &stmt.vars {
-            match var {
-                DefaultingVar::Var(path) => {
-                    self.result = self.result.and(self.resolve_path(
-                        Namespace::Value,
-                        self.current_scope_id,
-                        path,
-                    ));
-                }
-
-                DefaultingVar::Alias(stmt) => {
-                    self.visit_stmt_alias(stmt);
-                }
-            }
+            var.recurse(self);
         }
 
         self.enter_scope();
@@ -398,7 +386,7 @@ where
 
         match &stmt.else_branch {
             Some(Else::If(stmt)) => {
-                self.visit_stmt_if(stmt);
+                self.visit_stmt(stmt);
             }
 
             Some(Else::Block(block)) => {

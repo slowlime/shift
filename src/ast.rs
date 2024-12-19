@@ -686,6 +686,13 @@ impl<'a> Stmt<'a> {
             _ => panic!("called `as_alias` on a non-alias statement"),
         }
     }
+
+    pub fn as_if(&self) -> &StmtIf<'a> {
+        match self {
+            Self::If(stmt) => stmt,
+            _ => panic!("called `as_if` on a non-if statement"),
+        }
+    }
 }
 
 impl<'a> StmtRecurse<'a> for Stmt<'a> {
@@ -815,8 +822,8 @@ impl<'a> HasLoc<'a> for StmtDefaulting<'a> {
 
 #[derive(Debug, Clone)]
 pub enum DefaultingVar<'a> {
-    Var(Path<'a>),
-    Alias(StmtAlias<'a>),
+    Var(Expr<'a>),
+    Alias(Stmt<'a>),
 }
 
 impl<'a> StmtRecurse<'a> for DefaultingVar<'a> {
@@ -825,8 +832,8 @@ impl<'a> StmtRecurse<'a> for DefaultingVar<'a> {
         'a: 'b,
     {
         match self {
-            Self::Var(_) => {}
-            Self::Alias(stmt) => visitor.visit_stmt_alias(stmt),
+            Self::Var(expr) => visitor.visit_expr(expr),
+            Self::Alias(stmt) => visitor.visit_stmt(stmt),
         }
     }
 
@@ -835,8 +842,8 @@ impl<'a> StmtRecurse<'a> for DefaultingVar<'a> {
         'a: 'b,
     {
         match self {
-            Self::Var(_) => {}
-            Self::Alias(stmt) => visitor.visit_stmt_alias(stmt),
+            Self::Var(expr) => visitor.visit_expr(expr),
+            Self::Alias(stmt) => visitor.visit_stmt(stmt),
         }
     }
 }
@@ -926,7 +933,7 @@ impl<'a> HasLoc<'a> for StmtIf<'a> {
 
 #[derive(Debug, Clone)]
 pub enum Else<'a> {
-    If(Box<StmtIf<'a>>),
+    If(Box<Stmt<'a>>),
     Block(Block<'a>),
 }
 
@@ -936,7 +943,7 @@ impl<'a> StmtRecurse<'a> for Else<'a> {
         'a: 'b,
     {
         match self {
-            Self::If(stmt) => visitor.visit_stmt_if(stmt),
+            Self::If(stmt) => visitor.visit_stmt(stmt),
             Self::Block(block) => block.recurse(visitor),
         }
     }
@@ -946,7 +953,7 @@ impl<'a> StmtRecurse<'a> for Else<'a> {
         'a: 'b,
     {
         match self {
-            Self::If(stmt) => visitor.visit_stmt_if(stmt),
+            Self::If(stmt) => visitor.visit_stmt(stmt),
             Self::Block(block) => block.recurse_mut(visitor),
         }
     }

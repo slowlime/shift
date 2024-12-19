@@ -373,8 +373,13 @@ impl<'src, D: DiagCtx> Pass<'src, '_, D> {
 
         for var in &stmt.vars {
             result = result.and(match var {
-                DefaultingVar::Var(_) => Ok(()),
-                DefaultingVar::Alias(stmt) => self.typeck_stmt_alias(stmt),
+                DefaultingVar::Var(expr) => self
+                    .typeck_expr(expr)
+                    .and_then(|_| self.check_assignable(expr)),
+
+                DefaultingVar::Alias(stmt) => self
+                    .typeck_stmt(stmt)
+                    .and_then(|_| self.check_assignable(&stmt.as_alias().expr)),
             });
         }
 
@@ -401,7 +406,7 @@ impl<'src, D: DiagCtx> Pass<'src, '_, D> {
 
         if let Some(else_branch) = &stmt.else_branch {
             result = result.and(match else_branch {
-                Else::If(else_if) => self.typeck_stmt_if(else_if),
+                Else::If(else_if) => self.typeck_stmt(else_if),
                 Else::Block(else_branch) => self.typeck_block(else_branch),
             });
         }
@@ -523,8 +528,11 @@ impl<'src, D: DiagCtx> Pass<'src, '_, D> {
 
         let base_result = base_result.and_then(|_| match self.m.ty_defs[base_ty_def_id] {
             TyDef::Array(elem_ty_def_id, _) => {
-                let constant = self.m.exprs[expr.base.id()].constant.unwrap();
-                self.set_expr_info(expr.id, elem_ty_def_id, constant, !constant);
+                let base_constant = self.m.exprs[expr.base.id()].constant.unwrap();
+                let index_constant = self.m.exprs[expr.index.id()].constant.unwrap();
+                let constant = base_constant && index_constant;
+                let assignable = !base_constant;
+                self.set_expr_info(expr.id, elem_ty_def_id, constant, assignable);
 
                 Ok(())
             }

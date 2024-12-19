@@ -445,8 +445,10 @@ fn stmt_defaulting(i: Span<'_>) -> IResult<'_, StmtDefaulting<'_>> {
 
 fn defaulting_var(i: Span<'_>) -> IResult<'_, DefaultingVar<'_>> {
     alt((
-        stmt_alias.map(DefaultingVar::Alias),
-        terminated(path, cut(eol)).map(DefaultingVar::Var),
+        stmt_alias.map(Stmt::Alias).map(DefaultingVar::Alias),
+        terminated(expr_path, cut(eol))
+            .map(Expr::Path)
+            .map(DefaultingVar::Var),
     ))(i)
 }
 
@@ -495,7 +497,7 @@ fn stmt_if(i: Span<'_>) -> IResult<'_, StmtIf<'_>> {
         preceded(
             keyword(Keyword::Else),
             cut(alt((
-                if_branch.map(|stmt| Else::If(Box::new(stmt))),
+                if_branch.map(|stmt| Else::If(Box::new(Stmt::If(stmt)))),
                 block.map(Else::Block),
             ))),
         )(i)

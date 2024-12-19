@@ -22,21 +22,20 @@ var stall: [bool; N] = [false; N]
 
 trans {
   const for self_idx in 0..N {
-    either {
-      stall[self_idx] <- true
-    } or {
-      stall[self_idx] <- false
-    }
-  }
+    alias stall = stall[self_idx]
 
-  const for self_idx in 0..N {
+    either {
+      stall <- true
+    } or {
+      stall <- false
+    }
+
     defaulting {
       alias acquiring = acquiring[self_idx]
       alias ticket = ticket[self_idx]
       alias i = i[self_idx]
       alias next_ticket = next_ticket[self_idx]
       alias state = state[self_idx]
-      alias stall = stall[self_idx]
     } in {
       unless stall {
         match state {
@@ -82,7 +81,7 @@ trans {
           }
 
           State::WaitingInLine => {
-            unless (::ticket[i] != 0 && ::ticket[i] < ticket) {
+            unless ::ticket[i] != 0 && ::ticket[i] < ticket {
               if (::ticket[i] == ticket && i < self_idx) {
                 state <- State::BreakingTies
               } else {
@@ -93,7 +92,7 @@ trans {
           }
 
           State::BreakingTies => {
-            unless (::ticket[i] != 0) {
+            unless ::ticket[i] != 0 {
               state <- State::AwaitingAcquisition
             }
           }

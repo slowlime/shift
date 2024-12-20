@@ -1,15 +1,20 @@
+use std::collections::HashSet;
+use std::mem;
+use std::ops::{BitAndAssign, BitOrAssign};
+
 use slotmap::SparseSecondaryMap;
 
 use crate::ast::{
-    BinOp, BindingId, Builtin, Decl, DeclId, Expr, ExprArrayRepeat, ExprBinary, ExprBool, ExprFunc,
-    ExprIndex, ExprInt, ExprPath, ExprUnary, TyId, UnOp,
+    BinOp, BindingId, Block, Builtin, Decl, DeclId, DefaultingVar, Else, Expr, ExprArrayRepeat,
+    ExprBinary, ExprBool, ExprFunc, ExprIndex, ExprInt, ExprPath, ExprUnary, Stmt, StmtAlias,
+    StmtAssignNext, StmtConstFor, StmtDefaulting, StmtEither, StmtIf, StmtMatch, TyId, UnOp,
 };
 use crate::sema::{BindingKind, ConstValue, Result, TyDef, TyDefId};
 use crate::smv::{SmvExprFunc, SmvFunc};
 
 use super::{
-    Smv, SmvBinOp, SmvExpr, SmvExprBinary, SmvExprBool, SmvExprId, SmvExprInt, SmvExprName,
-    SmvExprNext, SmvExprUnary, SmvInit, SmvNameKind, SmvTy, SmvTyArray, SmvTyEnum, SmvTyId,
+    Smv, SmvBinOp, SmvExprBinary, SmvExprBool, SmvExprId, SmvExprInt, SmvExprName, SmvExprNext,
+    SmvExprUnary, SmvInit, SmvNameKind, SmvTrans, SmvTy, SmvTyArray, SmvTyEnum, SmvTyId,
     SmvTyRange, SmvUnOp, SmvVar, SmvVariant,
 };
 
@@ -31,21 +36,138 @@ enum Cond {
     True,
 
     Expr(SmvExprId),
-    And(Box<Cond>, Box<Cond>),
-    Or(Box<Cond>, Box<Cond>),
-    Assign(AssignCond),
+    And(Vec<Cond>),
+    Or(Vec<Cond>),
+    Assign(CondAssign),
 }
 
+impl Cond {
+    fn is_true(&self) -> bool {
+        match self {
+            Self::True => true,
+            Self::Expr(_) | Self::And(_) | Self::Or(_) => false,
+            Self::Assign(assign) => assign.is_true(),
+        }
+    }
+}
+
+impl BitAndAssign for Cond {
+    fn bitand_assign(&mut self, rhs: Self) {
+        match (mem::take(self), rhs) {
+            (Cond::True, cond) | (cond, Cond::True) => {
+                *self = cond;
+            }
+
+            (Cond::Assign(ref assign), cond) | (cond, Cond::Assign(ref assign))
+                if assign.is_true() =>
+            {
+                *self = cond;
+            }
+
+            (Cond::Assign(mut assign), cond) | (cond, Cond::Assign(mut assign)) => {
+                assign &= cond;
+                *self = Cond::Assign(assign);
+            }
+
+            (Cond::And(mut lhs), Cond::And(rhs)) => {
+                lhs.extend(rhs);
+                *self = Cond::And(lhs);
+            }
+
+            (Cond::And(mut conj), cond @ (Cond::Expr(_) | Cond::Or(_)))
+            | (cond @ (Cond::Expr(_) | Cond::Or(_)), Cond::And(mut conj)) => {
+                conj.push(cond);
+                *self = Cond::And(conj);
+            }
+
+            (lhs @ (Cond::Or(_) | Cond::Expr(_)), rhs @ (Cond::Or(_) | Cond::Expr(_))) => {
+                *self = Cond::And(vec![lhs, rhs]);
+            }
+        }
+    }
+}
+
+impl BitOrAssign for Cond {
+    fn bitor_assign(&mut self, rhs: Self) {
+        match (mem::take(self), rhs) {
+            (Cond::True, _) | (_, Cond::True) => {
+                *self = Cond::True;
+            }
+
+            (Cond::Assign(ref assign), _) | (_, Cond::Assign(ref assign)) if assign.is_true() => {
+                *self = Cond::True;
+            }
+
+            (Cond::Or(mut lhs), Cond::Or(rhs)) => {
+                lhs.extend(rhs);
+                *self = Cond::Or(lhs);
+            }
+
+            (Cond::Or(mut disj), cond @ (Cond::Expr(_) | Cond::And(_) | Cond::Assign(_)))
+            | (cond @ (Cond::Expr(_) | Cond::And(_) | Cond::Assign(_)), Cond::Or(mut disj)) => {
+                disj.push(cond);
+                *self = Cond::Or(disj);
+            }
+
+            (
+                lhs @ (Cond::And(_) | Cond::Expr(_) | Cond::Assign(_)),
+                rhs @ (Cond::And(_) | Cond::Expr(_) | Cond::Assign(_)),
+            ) => {
+                *self = Cond::Or(vec![lhs, rhs]);
+            }
+        }
+    }
+}
+
+// Corresponds to `cond ∧ assignments`
 #[derive(Debug, Default, Clone)]
-struct AssignCond {
+struct CondAssign {
     cond: Box<Cond>,
-    assignments: SparseSecondaryMap<BindingId, SmvExpr>,
+    assignments: SparseSecondaryMap<BindingId, SmvExprId>,
+}
+
+impl CondAssign {
+    fn is_true(&self) -> bool {
+        self.assignments.is_empty() && self.cond.is_true()
+    }
+}
+
+impl BitAndAssign for CondAssign {
+    fn bitand_assign(&mut self, rhs: Self) {
+        *self.cond &= *rhs.cond;
+        self.assignments.extend(rhs.assignments);
+    }
+}
+
+impl BitAndAssign<Cond> for CondAssign {
+    fn bitand_assign(&mut self, rhs: Cond) {
+        match rhs {
+            Cond::True => {}
+            Cond::Expr(_) | Cond::And(_) | Cond::Or(_) => *self.cond &= rhs,
+            Cond::Assign(cond) => *self &= cond,
+        }
+    }
+}
+
+impl BitOrAssign for CondAssign {
+    fn bitor_assign(&mut self, rhs: Self) {
+        let lhs = mem::take(self);
+        self.cond = Box::new(Cond::Or(vec![Cond::Assign(lhs), Cond::Assign(rhs)]));
+    }
+}
+
+impl BitOrAssign<Cond> for CondAssign {
+    fn bitor_assign(&mut self, rhs: Cond) {
+        let mut cond = Box::new(Cond::Assign(mem::take(self)));
+        *cond |= rhs;
+        self.cond = cond;
+    }
 }
 
 struct Pass<'a, 'b> {
     smv: &'b mut Smv<'a>,
-    cond: AssignCond,
-    env: Env,
+    cond: CondAssign,
+    env: Box<Env>,
 }
 
 impl<'a, 'b> Pass<'a, 'b> {
@@ -60,7 +182,7 @@ impl<'a, 'b> Pass<'a, 'b> {
     fn run(mut self) -> Result {
         self.prepare_env();
         self.lower_vars();
-        self.gen_trans();
+        self.lower_trans();
 
         todo!()
     }
@@ -171,11 +293,18 @@ impl<'a, 'b> Pass<'a, 'b> {
         }
     }
 
-    fn gen_trans(&mut self) {
-        todo!()
+    fn lower_trans(&mut self) {
+        let decl = self.smv.module.decls[self.smv.module.trans_decl_id]
+            .def
+            .as_trans();
+        self.lower_block(&decl.body);
+        let cond = Cond::Assign(mem::take(&mut self.cond));
+        let constr = self.lower_cond(&cond);
+        self.smv.trans.insert(SmvTrans { constr });
     }
 }
 
+// Expression lowering.
 impl<'a> Pass<'a, '_> {
     fn lower_variant_name(&mut self, decl_id: DeclId, idx: usize) -> SmvExprId {
         let ty_ns_id = self.smv.module.decl_ty_ns[decl_id];
@@ -200,20 +329,24 @@ impl<'a> Pass<'a, '_> {
     }
 
     fn lower_expr(&mut self, expr: &Expr<'a>) -> SmvExprId {
+        self.lower_expr_with_opts(expr, false)
+    }
+
+    fn lower_expr_with_opts(&mut self, expr: &Expr<'a>, assignee: bool) -> SmvExprId {
         match expr {
             Expr::Dummy => unreachable!(),
-            Expr::Path(expr) => self.lower_expr_path(expr),
-            Expr::Bool(expr) => self.lower_expr_bool(expr),
-            Expr::Int(expr) => self.lower_expr_int(expr),
-            Expr::ArrayRepeat(expr) => self.lower_expr_array_repeat(expr),
-            Expr::Index(expr) => self.lower_expr_index(expr),
-            Expr::Binary(expr) => self.lower_expr_binary(expr),
-            Expr::Unary(expr) => self.lower_expr_unary(expr),
-            Expr::Func(expr) => self.lower_expr_func(expr),
+            Expr::Path(expr) => self.lower_expr_path(expr, assignee),
+            Expr::Bool(expr) => self.lower_expr_bool(expr, assignee),
+            Expr::Int(expr) => self.lower_expr_int(expr, assignee),
+            Expr::ArrayRepeat(expr) => self.lower_expr_array_repeat(expr, assignee),
+            Expr::Index(expr) => self.lower_expr_index(expr, assignee),
+            Expr::Binary(expr) => self.lower_expr_binary(expr, assignee),
+            Expr::Unary(expr) => self.lower_expr_unary(expr, assignee),
+            Expr::Func(expr) => self.lower_expr_func(expr, assignee),
         }
     }
 
-    fn lower_expr_path(&mut self, expr: &ExprPath<'a>) -> SmvExprId {
+    fn lower_expr_path(&mut self, expr: &ExprPath<'a>, assignee: bool) -> SmvExprId {
         let binding_id = self.smv.module.paths[expr.path.id]
             .res
             .unwrap()
@@ -221,38 +354,58 @@ impl<'a> Pass<'a, '_> {
         let binding_kind = self.smv.module.bindings[binding_id].kind.as_ref().unwrap();
 
         match *binding_kind {
-            BindingKind::Const(_) | BindingKind::ConstFor(_) => {
-                self.reify_const_value(&self.env.consts[binding_id].clone())
+            BindingKind::Const(_) | BindingKind::ConstFor(_) => 'env: {
+                let mut parent = Some(&self.env);
+
+                while let Some(env) = parent {
+                    if let Some(value) = env.consts.get(binding_id) {
+                        break 'env self.reify_const_value(&value.clone());
+                    }
+
+                    parent = env.parent.as_ref();
+                }
+
+                unreachable!()
             }
 
-            BindingKind::Var(decl_id) => self.smv.exprs.insert(
+            BindingKind::Var(decl_id) => self.smv.exprs.insert(if assignee {
+                SmvExprNext {
+                    var_id: self.smv.var_map[decl_id],
+                }
+                .into()
+            } else {
                 SmvExprName {
                     kind: SmvNameKind::Var(self.smv.var_map[decl_id]),
                 }
-                .into(),
-            ),
+                .into()
+            }),
 
-            BindingKind::Alias(stmt_id) => {
-                self.lower_expr(&self.smv.module.stmts[stmt_id].def.as_alias().expr)
-            }
+            BindingKind::Alias(stmt_id) => self.lower_expr_with_opts(
+                &self.smv.module.stmts[stmt_id].def.as_alias().expr,
+                assignee,
+            ),
 
             BindingKind::Variant(decl_id, idx) => self.lower_variant_name(decl_id, idx),
         }
     }
 
-    fn lower_expr_bool(&mut self, expr: &ExprBool<'a>) -> SmvExprId {
+    fn lower_expr_bool(&mut self, expr: &ExprBool<'a>, _assignee: bool) -> SmvExprId {
         self.smv
             .exprs
             .insert(SmvExprBool { value: expr.value }.into())
     }
 
-    fn lower_expr_int(&mut self, expr: &ExprInt<'a>) -> SmvExprId {
+    fn lower_expr_int(&mut self, expr: &ExprInt<'a>, _assignee: bool) -> SmvExprId {
         self.smv
             .exprs
             .insert(SmvExprInt { value: expr.value }.into())
     }
 
-    fn lower_expr_array_repeat(&mut self, expr: &ExprArrayRepeat<'a>) -> SmvExprId {
+    fn lower_expr_array_repeat(
+        &mut self,
+        expr: &ExprArrayRepeat<'a>,
+        _assignee: bool,
+    ) -> SmvExprId {
         let ty_def_id = self.smv.module.exprs[expr.id].ty_def_id;
         let ty_id = self.lower_ty_def(ty_def_id);
 
@@ -262,7 +415,7 @@ impl<'a> Pass<'a, '_> {
         }
 
         let tyof_var_id = self.smv.ty_var_map[ty_id];
-        let elem = self.lower_expr(&expr.expr);
+        let elem = self.lower_expr_with_opts(&expr.expr, false);
 
         self.smv.exprs.insert(
             SmvExprFunc {
@@ -273,9 +426,9 @@ impl<'a> Pass<'a, '_> {
         )
     }
 
-    fn lower_expr_index(&mut self, expr: &ExprIndex<'a>) -> SmvExprId {
-        let base = self.lower_expr(&expr.base);
-        let index = self.lower_expr(&expr.index);
+    fn lower_expr_index(&mut self, expr: &ExprIndex<'a>, assignee: bool) -> SmvExprId {
+        let base = self.lower_expr_with_opts(&expr.base, assignee);
+        let index = self.lower_expr_with_opts(&expr.index, false);
 
         self.smv.exprs.insert(
             SmvExprFunc {
@@ -286,9 +439,9 @@ impl<'a> Pass<'a, '_> {
         )
     }
 
-    fn lower_expr_binary(&mut self, expr: &ExprBinary<'a>) -> SmvExprId {
-        let lhs = self.lower_expr(&expr.lhs);
-        let rhs = self.lower_expr(&expr.rhs);
+    fn lower_expr_binary(&mut self, expr: &ExprBinary<'a>, _assignee: bool) -> SmvExprId {
+        let lhs = self.lower_expr_with_opts(&expr.lhs, false);
+        let rhs = self.lower_expr_with_opts(&expr.rhs, false);
         let op = match expr.op {
             BinOp::Add => SmvBinOp::Add,
             BinOp::Sub => SmvBinOp::Sub,
@@ -305,8 +458,8 @@ impl<'a> Pass<'a, '_> {
         self.smv.exprs.insert(SmvExprBinary { lhs, op, rhs }.into())
     }
 
-    fn lower_expr_unary(&mut self, expr: &ExprUnary<'a>) -> SmvExprId {
-        let rhs = self.lower_expr(&expr.expr);
+    fn lower_expr_unary(&mut self, expr: &ExprUnary<'a>, _assignee: bool) -> SmvExprId {
+        let rhs = self.lower_expr_with_opts(&expr.expr, false);
         let op = match expr.op {
             UnOp::Neg => SmvUnOp::Neg,
             UnOp::Not => SmvUnOp::Not,
@@ -315,13 +468,293 @@ impl<'a> Pass<'a, '_> {
         self.smv.exprs.insert(SmvExprUnary { op, rhs }.into())
     }
 
-    fn lower_expr_func(&mut self, expr: &ExprFunc<'a>) -> SmvExprId {
-        let args = expr.args.iter().map(|arg| self.lower_expr(arg)).collect();
+    fn lower_expr_func(&mut self, expr: &ExprFunc<'a>, _assignee: bool) -> SmvExprId {
+        let args = expr
+            .args
+            .iter()
+            .map(|arg| self.lower_expr_with_opts(arg, false))
+            .collect();
         let func = match expr.builtin {
             Builtin::Min => SmvFunc::Min,
             Builtin::Max => SmvFunc::Max,
         };
 
         self.smv.exprs.insert(SmvExprFunc { func, args }.into())
+    }
+}
+
+// `Decl::Trans` lowering.
+impl<'a> Pass<'a, '_> {
+    fn lower_block(&mut self, block: &Block<'a>) {
+        for stmt in &block.stmts {
+            self.lower_stmt(stmt);
+        }
+    }
+
+    fn lower_stmt(&mut self, stmt: &Stmt<'a>) {
+        match stmt {
+            Stmt::Dummy => unreachable!(),
+            Stmt::ConstFor(stmt) => self.lower_stmt_const_for(stmt),
+            Stmt::Defaulting(stmt) => self.lower_stmt_defaulting(stmt),
+            Stmt::Alias(stmt) => self.lower_stmt_alias(stmt),
+            Stmt::If(stmt) => self.lower_stmt_if(stmt),
+            Stmt::Match(stmt) => self.lower_stmt_match(stmt),
+            Stmt::AssignNext(stmt) => self.lower_stmt_assign_next(stmt),
+            Stmt::Either(stmt) => self.lower_stmt_either(stmt),
+        }
+    }
+
+    fn lower_stmt_const_for(&mut self, stmt: &StmtConstFor<'a>) {
+        let lo = self.smv.module.exprs[stmt.lo.id()]
+            .value
+            .as_ref()
+            .unwrap()
+            .to_int();
+        let hi = self.smv.module.exprs[stmt.hi.id()]
+            .value
+            .as_ref()
+            .unwrap()
+            .to_int();
+
+        let env = std::mem::take(&mut self.env);
+        self.env.parent = Some(env);
+
+        for i in lo..hi {
+            self.env.consts.insert(stmt.binding.id, ConstValue::Int(i));
+            self.lower_block(&stmt.body);
+        }
+
+        self.env = self.env.parent.take().unwrap();
+    }
+
+    fn lower_stmt_defaulting(&mut self, stmt: &StmtDefaulting<'a>) {
+        let prev_cond = mem::take(&mut self.cond);
+        self.lower_block(&stmt.body);
+
+        let mut cond = mem::replace(&mut self.cond, prev_cond);
+        self.cond_to_dnf(&mut cond.cond);
+        {
+            let cond_cond = mem::take(&mut *cond.cond);
+            cond &= cond_cond;
+        }
+
+        let unassigned = stmt
+            .vars
+            .iter()
+            .map(|var| match var {
+                DefaultingVar::Var(expr) => self.smv.module.paths[expr.as_path().path.id]
+                    .res
+                    .unwrap()
+                    .into_binding_id(),
+                DefaultingVar::Alias(stmt) => stmt.as_alias().binding.id,
+            })
+            .filter(|&binding_id| !cond.assignments.contains_key(binding_id))
+            .collect::<HashSet<_>>();
+
+        match &mut *cond.cond {
+            Cond::True => {
+                for binding_id in unassigned {
+                    self.add_default_assignment(&mut cond, binding_id);
+                }
+            }
+
+            Cond::Or(conds) => {
+                for cond in conds {
+                    let Cond::Assign(cond) = cond else {
+                        unreachable!()
+                    };
+                    let assigned = cond.assignments.keys().collect::<HashSet<_>>();
+
+                    for &binding_id in unassigned.difference(&assigned) {
+                        self.add_default_assignment(cond, binding_id);
+                    }
+                }
+            }
+
+            _ => unreachable!(),
+        }
+
+        self.cond &= cond;
+    }
+
+    fn lower_stmt_alias(&mut self, _stmt: &StmtAlias<'a>) {}
+
+    fn lower_stmt_if(&mut self, stmt: &StmtIf<'a>) {
+        enum Branch<'a, 'b> {
+            If(&'b StmtIf<'a>),
+            Else(&'b Block<'a>),
+        }
+
+        impl<'a, 'b> Branch<'a, 'b> {
+            fn from_else(else_: &'b Else<'a>) -> Self {
+                match else_ {
+                    Else::If(stmt) => Self::If(stmt.as_if()),
+                    Else::Block(block) => Self::Else(block),
+                }
+            }
+
+            fn body(&self) -> &'b Block<'a> {
+                match self {
+                    Self::If(stmt) => &stmt.then_branch,
+                    Self::Else(block) => block,
+                }
+            }
+
+            fn else_branch(&self) -> Option<Branch<'a, 'b>> {
+                match self {
+                    Self::If(stmt) => stmt.else_branch.as_ref().map(Self::from_else),
+                    Self::Else(_) => None,
+                }
+            }
+
+            fn cond(&self) -> Option<&'b Expr<'a>> {
+                match self {
+                    Self::If(stmt) => Some(&stmt.cond),
+                    Self::Else(_) => None,
+                }
+            }
+        }
+
+        let prev_cond = mem::take(&mut self.cond);
+        let mut branch_conds = vec![];
+        let mut next_branch = Some(Branch::If(stmt));
+
+        while let Some(branch) = next_branch {
+            if let Some(last) = branch_conds.last_mut() {
+                *last = self.smv.exprs.insert(
+                    SmvExprUnary {
+                        op: SmvUnOp::Not,
+                        rhs: *last,
+                    }
+                    .into(),
+                );
+            }
+
+            if let Some(cond) = branch.cond() {
+                branch_conds.push(self.lower_expr(cond));
+            }
+
+            let if_cond = mem::take(&mut self.cond);
+            let branch_cond = Cond::Expr(self.make_and(&branch_conds));
+            self.cond &= branch_cond;
+            self.lower_block(branch.body());
+            let branch_cond = mem::replace(&mut self.cond, if_cond);
+            self.cond |= branch_cond;
+            next_branch = branch.else_branch();
+        }
+
+        let if_cond = mem::replace(&mut self.cond, prev_cond);
+        self.cond &= if_cond;
+    }
+
+    fn lower_stmt_match(&mut self, stmt: &StmtMatch<'a>) {
+        let scrutinee = self.lower_expr(&stmt.scrutinee);
+        let prev_cond = mem::take(&mut self.cond);
+        let mut branch_conds = vec![];
+
+        for arm in &stmt.arms {
+            let expr = self.lower_expr(&arm.expr);
+
+            if let Some(last) = branch_conds.last_mut() {
+                *last = self.smv.exprs.insert(
+                    SmvExprUnary {
+                        op: SmvUnOp::Not,
+                        rhs: *last,
+                    }
+                    .into(),
+                );
+            }
+
+            branch_conds.push(
+                self.smv.exprs.insert(
+                    SmvExprBinary {
+                        lhs: scrutinee,
+                        op: SmvBinOp::Eq,
+                        rhs: expr,
+                    }
+                    .into(),
+                ),
+            );
+
+            let match_cond = mem::take(&mut self.cond);
+            let branch_cond = Cond::Expr(self.make_and(&branch_conds));
+            self.cond &= branch_cond;
+            self.lower_block(&arm.body);
+            let arm_cond = mem::replace(&mut self.cond, match_cond);
+            self.cond |= arm_cond;
+        }
+
+        let match_cond = mem::replace(&mut self.cond, prev_cond);
+        self.cond &= match_cond;
+    }
+
+    fn lower_stmt_assign_next(&mut self, stmt: &StmtAssignNext<'a>) {
+        let rhs = self.lower_expr(&stmt.rhs);
+
+        if let Expr::Path(lhs) = &stmt.lhs {
+            let binding_id = self.smv.module.paths[lhs.path.id]
+                .res
+                .unwrap()
+                .into_binding_id();
+            self.cond.assignments.insert(binding_id, rhs);
+        } else {
+            let lhs = self.lower_expr_with_opts(&stmt.lhs, true);
+            self.cond &= Cond::Expr(
+                self.smv.exprs.insert(
+                    SmvExprBinary {
+                        lhs,
+                        op: SmvBinOp::Eq,
+                        rhs,
+                    }
+                    .into(),
+                ),
+            );
+        }
+    }
+
+    fn lower_stmt_either(&mut self, stmt: &StmtEither<'a>) {
+        let prev_cond = mem::take(&mut self.cond);
+
+        for block in &stmt.blocks {
+            let either_cond = mem::take(&mut self.cond);
+            self.lower_block(block);
+            let block_cond = mem::replace(&mut self.cond, either_cond);
+            self.cond |= block_cond;
+        }
+
+        let either_cond = mem::replace(&mut self.cond, prev_cond);
+        self.cond &= either_cond;
+    }
+}
+
+// Condition transforms.
+impl Pass<'_, '_> {
+    fn lower_cond(&mut self, cond: &Cond) -> SmvExprId {
+        todo!()
+    }
+
+    fn cond_to_dnf(&self, cond: &mut Cond) {
+        todo!()
+    }
+
+    fn add_default_assignment(&mut self, cond: &mut CondAssign, binding_id: BindingId) {
+        todo!()
+    }
+
+    fn make_and(&mut self, exprs: &[SmvExprId]) -> SmvExprId {
+        exprs
+            .iter()
+            .copied()
+            .reduce(|lhs, rhs| {
+                self.smv.exprs.insert(
+                    SmvExprBinary {
+                        lhs,
+                        op: SmvBinOp::And,
+                        rhs,
+                    }
+                    .into(),
+                )
+            })
+            .unwrap_or_else(|| self.smv.exprs.insert(SmvExprBool { value: true }.into()))
     }
 }

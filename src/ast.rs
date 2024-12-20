@@ -1116,18 +1116,25 @@ pub enum Expr<'a> {
     Func(ExprFunc<'a>),
 }
 
-impl Expr<'_> {
+impl<'a> Expr<'a> {
     pub fn id(&self) -> ExprId {
         match self {
-            Expr::Dummy => Default::default(),
-            Expr::Path(expr) => expr.id,
-            Expr::Bool(expr) => expr.id,
-            Expr::Int(expr) => expr.id,
-            Expr::ArrayRepeat(expr) => expr.id,
-            Expr::Index(expr) => expr.id,
-            Expr::Binary(expr) => expr.id,
-            Expr::Unary(expr) => expr.id,
-            Expr::Func(expr) => expr.id,
+            Self::Dummy => Default::default(),
+            Self::Path(expr) => expr.id,
+            Self::Bool(expr) => expr.id,
+            Self::Int(expr) => expr.id,
+            Self::ArrayRepeat(expr) => expr.id,
+            Self::Index(expr) => expr.id,
+            Self::Binary(expr) => expr.id,
+            Self::Unary(expr) => expr.id,
+            Self::Func(expr) => expr.id,
+        }
+    }
+
+    pub fn as_path(&self) -> &ExprPath<'a> {
+        match self {
+            Self::Path(expr) => expr,
+            _ => panic!("called `as_path` on a non-path expression"),
         }
     }
 }

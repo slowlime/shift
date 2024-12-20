@@ -32,7 +32,27 @@ pub struct Smv<'a> {
     pub next_synthetic_var_idx: usize,
 }
 
-impl Smv<'_> {
+impl<'a> Smv<'a> {
+    pub fn new(module: Module<'a>) -> Self {
+        let mut smv = Self {
+            module,
+            tys: Default::default(),
+            exprs: Default::default(),
+            defines: Default::default(),
+            vars: Default::default(),
+            init: Default::default(),
+            trans: Default::default(),
+            invar: Default::default(),
+            var_map: Default::default(),
+            ty_map: Default::default(),
+            ty_var_map: Default::default(),
+            next_synthetic_var_idx: 0,
+        };
+        smv.gen_constrs();
+
+        smv
+    }
+
     pub fn new_synthetic_var(&mut self, prefix: &str, ty_id: SmvTyId) -> SmvVarId {
         let idx = self.next_synthetic_var_idx;
         let name = format!("${prefix}#{idx}");

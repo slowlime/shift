@@ -4,7 +4,7 @@ use slotmap::SecondaryMap;
 
 use crate::ast::visit::{DefaultDeclVisitor, DefaultStmtVisitor, DefaultVisitor};
 use crate::ast::{ExprPath, HasLoc};
-use crate::diag::DiagCtx;
+use crate::diag::{self, Diag, DiagCtx, Note};
 
 use super::{BindingKind, DeclId, ExprId, Module, Res, Result};
 
@@ -56,6 +56,7 @@ impl<'src, 'm, D: DiagCtx> Pass<'src, 'm, D> {
     }
 
     fn topo_sort(&mut self) -> Result {
+        #[derive(Debug, Clone)]
         struct Task<I> {
             decl_id: DeclId,
             iter: I,
@@ -63,7 +64,10 @@ impl<'src, 'm, D: DiagCtx> Pass<'src, 'm, D> {
 
         #[derive(Debug, Clone, Copy)]
         enum State {
-            Discovered,
+            Discovered {
+                stack_idx: usize,
+                in_expr_id: ExprId,
+            },
             Visited,
         }
 
@@ -75,9 +79,17 @@ impl<'src, 'm, D: DiagCtx> Pass<'src, 'm, D> {
             }
 
             let Some(deps) = self.dep.dependencies.get(decl_id) else {
+                self.dep.order.push(decl_id);
+                state.insert(decl_id, State::Visited);
                 continue;
             };
-            state.insert(decl_id, State::Discovered);
+            state.insert(
+                decl_id,
+                State::Discovered {
+                    stack_idx: 0,
+                    in_expr_id: Default::default(),
+                },
+            );
             let mut stack = vec![Task {
                 decl_id,
                 iter: deps.iter(),
@@ -90,16 +102,39 @@ impl<'src, 'm, D: DiagCtx> Pass<'src, 'm, D> {
             {
                 if let Some((&dep_decl_id, &expr_id)) = iter.next() {
                     match state.get(dep_decl_id).copied() {
-                        Some(State::Discovered) => {
+                        Some(State::Discovered { stack_idx, .. }) => {
                             let decl_name = self.m.decls[decl_id].def.name();
                             let dep_decl_name = self.m.decls[dep_decl_id].def.name();
-                            self.diag.err_at(
-                                self.m.exprs[expr_id].def.loc(),
-                                format!(
+
+                            let cycle = &stack[stack_idx..];
+                            let mut notes = vec![];
+
+                            for (idx, &Task { decl_id, .. }) in
+                                cycle.iter().enumerate().take(cycle.len() - 1)
+                            {
+                                let dep_decl_id = cycle[idx + 1].decl_id;
+                                let State::Discovered { in_expr_id, .. } = state[dep_decl_id]
+                                else {
+                                    unreachable!();
+                                };
+                                notes.push(Note {
+                                    loc: Some(self.m.exprs[in_expr_id].def.loc()),
+                                    message: format!(
+                                        "evaluation of `{}` depends on `{}`",
+                                        self.m.decls[decl_id].def.name(),
+                                        self.m.decls[dep_decl_id].def.name(),
+                                    ),
+                                });
+                            }
+                            self.diag.emit(Diag {
+                                level: diag::Level::Err,
+                                loc: Some(self.m.exprs[expr_id].def.loc()),
+                                message: format!(
                                     "found a cyclic dependency between `{}` and `{}`",
                                     decl_name, dep_decl_name,
                                 ),
-                            );
+                                notes,
+                            });
 
                             return Err(());
                         }
@@ -108,7 +143,13 @@ impl<'src, 'm, D: DiagCtx> Pass<'src, 'm, D> {
 
                         None => {
                             if let Some(deps) = self.dep.dependencies.get(dep_decl_id) {
-                                state.insert(dep_decl_id, State::Discovered);
+                                state.insert(
+                                    dep_decl_id,
+                                    State::Discovered {
+                                        stack_idx: stack.len(),
+                                        in_expr_id: expr_id,
+                                    },
+                                );
                                 stack.push(Task {
                                     decl_id: dep_decl_id,
                                     iter: deps.iter(),
@@ -120,6 +161,7 @@ impl<'src, 'm, D: DiagCtx> Pass<'src, 'm, D> {
                     }
                 } else {
                     self.dep.order.push(decl_id);
+                    state.insert(decl_id, State::Visited);
                     stack.pop();
                 }
             }

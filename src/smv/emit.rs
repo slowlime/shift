@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use super::{Smv, SmvBinOp, SmvExpr, SmvExprId, SmvFunc, SmvNameKind, SmvTy, SmvTyId, SmvUnOp, SmvVariant};
+use super::{Smv, SmvExpr, SmvExprId, SmvFunc, SmvNameKind, SmvTy, SmvTyId, SmvVariant};
 
 impl Smv<'_> {
     pub fn emit<W: Write>(&self, writer: W) -> io::Result<()> {
@@ -30,7 +30,7 @@ impl<'a, W: Write> Emitter<'a, W> {
     }
 
     fn emit_module_decl(&mut self) -> io::Result<()> {
-        write!(self.writer, "MODULE main")
+        writeln!(self.writer, "MODULE main")
     }
 
     fn emit_vars(&mut self) -> io::Result<()> {
@@ -196,20 +196,7 @@ impl<'a, W: Write> Emitter<'a, W> {
             }
 
             SmvExpr::Binary(expr) => {
-                let (lhs_prec, rhs_prec) = match expr.op {
-                    SmvBinOp::Implies => (1, 0),
-                    SmvBinOp::Or => (3, 4),
-                    SmvBinOp::And => (4, 5),
-
-                    SmvBinOp::Eq
-                    | SmvBinOp::Ne
-                    | SmvBinOp::Lt
-                    | SmvBinOp::Gt
-                    | SmvBinOp::Le
-                    | SmvBinOp::Ge => (5, 6),
-
-                    SmvBinOp::Add | SmvBinOp::Sub => (9, 10),
-                };
+                let (lhs_prec, rhs_prec) = expr.op.prec();
                 let self_prec = lhs_prec.min(rhs_prec);
 
                 if self_prec < prec {
@@ -228,10 +215,7 @@ impl<'a, W: Write> Emitter<'a, W> {
             }
 
             SmvExpr::Unary(expr) => {
-                let rhs_prec = match expr.op {
-                    SmvUnOp::Not => 13,
-                    SmvUnOp::Neg => 12,
-                };
+                let rhs_prec = expr.op.prec();
                 let self_prec = rhs_prec;
 
                 if self_prec < prec {

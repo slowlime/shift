@@ -1,11 +1,16 @@
-mod gen_constrs;
 mod emit;
+mod gen_constrs;
+
+use std::fmt::{self, Display};
 
 use derive_more::derive::{Display, From};
 use slotmap::{new_key_type, SecondaryMap, SlotMap, SparseSecondaryMap};
 
 use crate::ast::DeclId;
+use crate::diag::DiagCtx;
 use crate::sema::{Module, TyDefId};
+
+pub use crate::sema::Result;
 
 new_key_type! {
     pub struct SmvTyId;
@@ -34,7 +39,7 @@ pub struct Smv<'a> {
 }
 
 impl<'a> Smv<'a> {
-    pub fn new(module: Module<'a>) -> Self {
+    pub fn new(module: Module<'a>, diag: &mut impl DiagCtx) -> Result<Self> {
         let mut smv = Self {
             module,
             tys: Default::default(),
@@ -49,9 +54,9 @@ impl<'a> Smv<'a> {
             ty_var_map: Default::default(),
             next_synthetic_var_idx: 0,
         };
-        smv.gen_constrs();
+        smv.gen_constrs(diag)?;
 
-        smv
+        Ok(smv)
     }
 
     pub fn new_synthetic_var(&mut self, prefix: &str, ty_id: SmvTyId) -> SmvVarId {
@@ -60,6 +65,102 @@ impl<'a> Smv<'a> {
         self.next_synthetic_var_idx += 1;
 
         self.vars.insert(SmvVar { name, ty_id })
+    }
+
+    pub fn display_expr(&self, expr_id: SmvExprId) -> impl Display + '_ {
+        self.display_expr_prec(expr_id, 0)
+    }
+
+    pub fn display_expr_prec(&self, expr_id: SmvExprId, prec: usize) -> impl Display + '_ {
+        struct Fmt<'a, 'b>(&'b Smv<'a>, SmvExprId, usize);
+
+        impl Display for Fmt<'_, '_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match &self.0.exprs[self.1] {
+                    SmvExpr::Int(expr) => write!(f, "{}", expr.value),
+                    SmvExpr::Bool(expr) => write!(f, "{}", expr.value),
+
+                    SmvExpr::Name(expr) => match expr.kind {
+                        SmvNameKind::Var(var_id) => write!(f, "{}", self.0.vars[var_id].name),
+
+                        SmvNameKind::Variant(ty_id, idx) => {
+                            let SmvTy::Enum(ty) = &self.0.tys[ty_id] else {
+                                unreachable!();
+                            };
+
+                            write!(f, "{}", ty.variants[idx])
+                        }
+                    },
+
+                    SmvExpr::Next(expr) => write!(f, "next({})", self.0.vars[expr.var_id].name),
+
+                    SmvExpr::Func(expr) => {
+                        match expr.func {
+                            SmvFunc::Min => write!(f, "min(")?,
+                            SmvFunc::Max => write!(f, "max(")?,
+                            SmvFunc::Read => write!(f, "READ(")?,
+                            SmvFunc::Write => write!(f, "WRITE(")?,
+                            SmvFunc::Constarray(var_id) => {
+                                write!(f, "CONSTARRAY(typeof({})", self.0.vars[var_id].name)?
+                            }
+                        }
+
+                        let mut first = !matches!(expr.func, SmvFunc::Constarray(_));
+
+                        for arg in &expr.args {
+                            if first {
+                                first = false;
+                            } else {
+                                write!(f, ", ")?;
+                            }
+
+                            self.0.display_expr_prec(*arg, 0).fmt(f)?;
+                        }
+
+                        write!(f, ")")
+                    }
+
+                    SmvExpr::Binary(expr) => {
+                        let (lhs_prec, rhs_prec) = expr.op.prec();
+                        let self_prec = lhs_prec.min(rhs_prec);
+
+                        if self_prec < self.2 {
+                            write!(f, "(")?;
+                        }
+
+                        self.0.display_expr_prec(expr.lhs, lhs_prec).fmt(f)?;
+                        write!(f, " {} ", expr.op)?;
+                        self.0.display_expr_prec(expr.rhs, rhs_prec).fmt(f)?;
+
+                        if self_prec < self.2 {
+                            write!(f, ")")?;
+                        }
+
+                        Ok(())
+                    }
+
+                    SmvExpr::Unary(expr) => {
+                        let rhs_prec = expr.op.prec();
+                        let self_prec = rhs_prec;
+
+                        if self_prec < self.2 {
+                            write!(f, "(")?;
+                        }
+
+                        write!(f, "{}", expr.op)?;
+                        self.0.display_expr_prec(expr.rhs, rhs_prec).fmt(f)?;
+
+                        if self_prec < self.2 {
+                            write!(f, ")")?;
+                        }
+
+                        Ok(())
+                    }
+                }
+            }
+        }
+
+        Fmt(self, expr_id, prec)
     }
 }
 
@@ -194,6 +295,25 @@ pub enum SmvBinOp {
     Sub,
 }
 
+impl SmvBinOp {
+    pub fn prec(&self) -> (usize, usize) {
+        match self {
+            SmvBinOp::Implies => (1, 0),
+            SmvBinOp::Or => (3, 4),
+            SmvBinOp::And => (4, 5),
+
+            SmvBinOp::Eq
+            | SmvBinOp::Ne
+            | SmvBinOp::Lt
+            | SmvBinOp::Gt
+            | SmvBinOp::Le
+            | SmvBinOp::Ge => (5, 6),
+
+            SmvBinOp::Add | SmvBinOp::Sub => (9, 10),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SmvExprUnary {
     pub op: SmvUnOp,
@@ -207,6 +327,15 @@ pub enum SmvUnOp {
 
     #[display("-")]
     Neg,
+}
+
+impl SmvUnOp {
+    pub fn prec(&self) -> usize {
+        match self {
+            SmvUnOp::Not => 13,
+            SmvUnOp::Neg => 12,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

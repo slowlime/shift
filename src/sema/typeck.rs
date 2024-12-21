@@ -131,7 +131,21 @@ impl<'src, 'm, D: DiagCtx> Pass<'src, 'm, D> {
             return true;
         }
 
-        ty_def_id == expected_ty_def_id
+        if ty_def_id == expected_ty_def_id {
+            return true;
+        }
+
+        #[allow(
+            clippy::match_like_matches_macro,
+            reason = "`match` is easier to expand later"
+        )]
+        match (
+            &self.m.ty_defs[ty_def_id],
+            &self.m.ty_defs[expected_ty_def_id],
+        ) {
+            (TyDef::Range(..), TyDef::Int) | (TyDef::Int, TyDef::Range(..)) => true,
+            _ => false,
+        }
     }
 
     fn check_ty(
@@ -155,7 +169,13 @@ impl<'src, 'm, D: DiagCtx> Pass<'src, 'm, D> {
             &self.m.ty_defs[rhs_ty_def_id],
         ) {
             _ if lhs_ty_def_id == rhs_ty_def_id => Some(lhs_ty_def_id),
+
             (TyDef::Error, _) | (_, TyDef::Error) => Some(self.m.primitive_tys.error),
+
+            (TyDef::Range(..), TyDef::Int)
+            | (TyDef::Int, TyDef::Range(..))
+            | (TyDef::Range(..), TyDef::Range(..)) => Some(self.m.primitive_tys.int),
+
             _ => None,
         }
     }
@@ -167,6 +187,11 @@ impl<'src, 'm, D: DiagCtx> Pass<'src, 'm, D> {
         constant: bool,
         assignable: bool,
     ) {
+        debug_assert_ne!(
+            ty_def_id,
+            Default::default(),
+            "trying to assign a null ty_def_id"
+        );
         let expr_info = &mut self.m.exprs[expr_id];
         expr_info.ty_def_id = ty_def_id;
         expr_info.constant = Some(constant);
@@ -489,9 +514,8 @@ impl<'src, D: DiagCtx> Pass<'src, '_, D> {
         self.set_expr_info(expr.id, self.m.primitive_tys.error, false, false);
         let mut result = self.typeck_expr(&expr.expr);
         result = result.and(self.typeck_expr(&expr.len));
-        let elem_ty_def_id = self.m.exprs[expr.len.id()].ty_def_id;
-        result =
-            result.and(self.check_ty(expr.len.loc(), self.m.primitive_tys.int, elem_ty_def_id));
+        let len_ty_def_id = self.m.exprs[expr.len.id()].ty_def_id;
+        result = result.and(self.check_ty(expr.len.loc(), self.m.primitive_tys.int, len_ty_def_id));
         result?;
 
         self.const_eval(&expr.len)?;
@@ -509,6 +533,7 @@ impl<'src, D: DiagCtx> Pass<'src, '_, D> {
             }
         };
 
+        let elem_ty_def_id = self.m.exprs[expr.expr.id()].ty_def_id;
         let ty_def_id = self.add_ty(TyDef::Array(elem_ty_def_id, len));
         self.set_expr_info(expr.id, ty_def_id, false, false);
 
@@ -565,7 +590,7 @@ impl<'src, D: DiagCtx> Pass<'src, '_, D> {
         let rhs_constant = rhs_info.constant.unwrap();
 
         match expr.op {
-            BinOp::Add | BinOp::Sub | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+            BinOp::Add | BinOp::Sub => {
                 result = result.and(self.check_ty(
                     expr.lhs.loc(),
                     self.m.primitive_tys.int,
@@ -579,6 +604,25 @@ impl<'src, D: DiagCtx> Pass<'src, '_, D> {
                 self.set_expr_info(
                     expr.id,
                     self.m.primitive_tys.int,
+                    lhs_constant && rhs_constant,
+                    false,
+                );
+            }
+
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                result = result.and(self.check_ty(
+                    expr.lhs.loc(),
+                    self.m.primitive_tys.int,
+                    lhs_ty_def_id,
+                ));
+                result = result.and(self.check_ty(
+                    expr.rhs.loc(),
+                    self.m.primitive_tys.int,
+                    rhs_ty_def_id,
+                ));
+                self.set_expr_info(
+                    expr.id,
+                    self.m.primitive_tys.bool,
                     lhs_constant && rhs_constant,
                     false,
                 );
@@ -771,8 +815,9 @@ impl<'src, D: DiagCtx> Pass<'src, '_, D> {
             TyDef::Bool => Ok(()),
             TyDef::Error => Ok(()),
             TyDef::Enum(..) => Ok(()),
+            TyDef::Range(..) => Ok(()),
 
-            TyDef::Range(..) | TyDef::Array(..) => {
+            TyDef::Array(..) => {
                 self.diag.err_at(
                     loc,
                     format!(
@@ -880,7 +925,7 @@ impl<'src, 'a, D: DiagCtx> ConstEvaluator<'src, 'a, D> {
             }
 
             BindingKind::ConstFor(_) => {
-                self.diag.err_at(
+                self.err_at(
                     expr.loc(),
                     "cannot evaluate a constant for variable while type-checking".into(),
                 );
@@ -889,7 +934,7 @@ impl<'src, 'a, D: DiagCtx> ConstEvaluator<'src, 'a, D> {
             }
 
             BindingKind::Var(_) => {
-                self.diag.err_at(
+                self.err_at(
                     expr.loc(),
                     "cannot evaluate a variable while type-checking".into(),
                 );

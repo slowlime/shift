@@ -31,13 +31,20 @@ pub enum Loc<'a> {
 }
 
 impl<'a> Loc<'a> {
+    pub fn source(&self) -> &'a str {
+        match self {
+            Self::Span(s) => s.fragment(),
+            Self::Builtin => "",
+        }
+    }
+
     pub fn fmt_defined_at(self) -> impl Display + 'a {
         struct AtDefinedFmt<'a>(Loc<'a>);
 
         impl Display for AtDefinedFmt<'_> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 match self.0 {
-                    Loc::Span(span) => write!(f, "at {span}"),
+                    Loc::Span(_) => write!(f, "at {}", self.0),
                     Loc::Builtin => write!(f, "internally by the compiler"),
                 }
             }

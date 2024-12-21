@@ -1,6 +1,6 @@
 use std::mem;
 
-use derive_more::derive::{Display, From};
+use derive_more::derive::Display;
 
 use crate::ast::visit::{
     DeclRecurse, DefaultDeclVisitor, DefaultVisitor, StmtRecurse, StmtVisitor,
@@ -11,9 +11,7 @@ use crate::ast::{
 };
 use crate::diag::DiagCtx;
 
-use super::{
-    BindingId, BindingInfo, BindingKind, DeclId, Module, Result, Scope, ScopeId, TyNs, TyNsId,
-};
+use super::{BindingId, BindingKind, DeclId, Module, Result, Scope, ScopeId, TyNs, TyNsId};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Res {
@@ -48,7 +46,7 @@ pub enum Namespace {
 
 impl Path<'_> {
     pub fn segment_ns(&self, path_ns: Namespace, segment_idx: usize) -> Namespace {
-        if segment_idx + 1 >= self.segments.len() {
+        if segment_idx + 1 < self.segments.len() {
             Namespace::Ty
         } else {
             path_ns
@@ -89,11 +87,16 @@ impl Module<'_> {
             }
 
             let Some(result) = result else {
+                let base = path.display_first(idx).to_string();
                 diag.err_at(
                     segment.loc(),
                     format!(
-                        "could not find `{segment}` in `{}` in the {segment_ns} namespace",
-                        path.display_first(idx),
+                        "could not find `{segment}` {}in the {segment_ns} namespace",
+                        if base.is_empty() {
+                            "".into()
+                        } else {
+                            format!("in `{base}` ")
+                        }
                     ),
                 );
                 return Err(());
@@ -132,12 +135,6 @@ impl Module<'_> {
                 .map(Res::Binding),
         }
     }
-}
-
-#[derive(From)]
-enum ScopeValue<'a> {
-    Ty(TyNs<'a>),
-    Binding(BindingInfo<'a>),
 }
 
 struct Pass<'src, 'm, D> {
@@ -423,6 +420,13 @@ where
     }
 
     fn visit_binding(&mut self, binding: &'ast Binding<'src>) {
+        if let BindingKind::Var(_) | BindingKind::Const(_) =
+            self.pass.m.bindings[binding.id].kind.as_ref().unwrap()
+        {
+            // ignore: already added in the preliminary pass.
+            return;
+        }
+
         self.result = self.result.and(self.pass.add_value_to_scope(
             self.current_scope_id,
             binding.name.to_string(),

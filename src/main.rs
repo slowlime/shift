@@ -21,7 +21,10 @@ fn main() -> ExitCode {
         Ok(input) => input,
 
         Err(e) => {
-            eprintln!("Could not read the input file `{}`: {e}", args.input.display());
+            eprintln!(
+                "Could not read the input file `{}`: {e}",
+                args.input.display()
+            );
             return ExitCode::from(2);
         }
     };
@@ -30,19 +33,22 @@ fn main() -> ExitCode {
         Ok(decls) => decls,
 
         Err(e) => {
-            eprintln!("Could not parse the input file `{}`: {e}", args.input.display());
+            eprintln!(
+                "Could not parse the input file `{}`: {e}",
+                args.input.display()
+            );
             return ExitCode::FAILURE;
         }
     };
 
     let mut diag = StderrDiagCtx;
-    let (module, result) = sema::process(&mut decls, &mut diag);
-
-    if result.is_err() {
+    let (module, Ok(())) = sema::process(&mut decls, &mut diag) else {
         return ExitCode::FAILURE;
-    }
+    };
 
-    let smv = Smv::new(module);
+    let Ok(smv) = Smv::new(module, &mut diag) else {
+        return ExitCode::FAILURE;
+    };
 
     {
         let mut f;
@@ -60,7 +66,10 @@ fn main() -> ExitCode {
                     Ok(file) => f = file,
 
                     Err(e) => {
-                        diag.err(format!("Could not open the output file `{}`: {e}", path.display()));
+                        diag.err(format!(
+                            "Could not open the output file `{}`: {e}",
+                            path.display()
+                        ));
                         return ExitCode::FAILURE;
                     }
                 }

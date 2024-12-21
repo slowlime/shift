@@ -178,6 +178,8 @@ where
             Ty::Array(ty) => ty.id = ty_id,
             Ty::Path(ty) => ty.id = ty_id,
         }
+
+        ty.recurse_mut(self);
     }
 
     fn visit_path(&mut self, path: &'b mut Path<'a>) {

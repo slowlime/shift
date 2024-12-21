@@ -1,6 +1,7 @@
 mod gen_constrs;
+mod emit;
 
-use derive_more::derive::From;
+use derive_more::derive::{Display, From};
 use slotmap::{new_key_type, SecondaryMap, SlotMap, SparseSecondaryMap};
 
 use crate::ast::DeclId;
@@ -76,9 +77,12 @@ pub struct SmvTyEnum {
     pub variants: Vec<SmvVariant>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Display, Debug, Clone)]
 pub enum SmvVariant {
+    #[display("{_0}")]
     Int(i64),
+
+    #[display("{_0}")]
     Sym(String),
 }
 
@@ -154,18 +158,39 @@ pub struct SmvExprBinary {
     pub rhs: SmvExprId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Display, Debug, Clone)]
 pub enum SmvBinOp {
+    #[display("&")]
     And,
+
+    #[display("|")]
     Or,
+
+    #[display("->")]
     Implies,
+
+    #[display("=")]
     Eq,
+
+    #[display("!=")]
     Ne,
+
+    #[display("<")]
     Lt,
+
+    #[display(">")]
     Gt,
+
+    #[display("<=")]
     Le,
+
+    #[display(">=")]
     Ge,
+
+    #[display("+")]
     Add,
+
+    #[display("-")]
     Sub,
 }
 
@@ -175,9 +200,12 @@ pub struct SmvExprUnary {
     pub rhs: SmvExprId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Display, Debug, Clone)]
 pub enum SmvUnOp {
+    #[display("!")]
     Not,
+
+    #[display("-")]
     Neg,
 }
 

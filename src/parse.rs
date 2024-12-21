@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 
 use derive_more::derive::Display;
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take};
+use nom::bytes::complete::take;
 use nom::character::complete::{alpha1, alphanumeric1, digit1, line_ending, multispace0, space0};
 use nom::combinator::{
     consumed, cut, eof, flat_map, map, map_res, not, opt, peek, recognize, value, verify,
@@ -13,22 +13,27 @@ use nom::combinator::{
 use nom::error::ParseError;
 use nom::multi::{many0, many0_count, many1};
 use nom::sequence::{delimited, pair, preceded, separated_pair, terminated, tuple};
-use nom::{AsChar, InputLength, Parser};
-use nom_supreme::error::ErrorTree;
+use nom::{AsChar, Err, InputLength, Parser};
+use nom_supreme::error::GenericErrorTree;
 use nom_supreme::final_parser::final_parser;
+use nom_supreme::tag::complete::tag;
+use nom_supreme::tag::TagError;
 
 use crate::ast::{
     Arm, BinOp, Binding, Block, Builtin, Decl, DeclConst, DeclEnum, DeclTrans, DeclVar,
     DefaultingVar, Else, Expr, ExprArrayRepeat, ExprBinary, ExprBool, ExprFunc, ExprIndex, ExprInt,
-    ExprPath, ExprUnary, Name, Path, Span, Stmt, StmtAlias, StmtAssignNext, StmtConstFor,
+    ExprPath, ExprUnary, Loc, Name, Path, Span, Stmt, StmtAlias, StmtAssignNext, StmtConstFor,
     StmtDefaulting, StmtEither, StmtIf, StmtMatch, Ty, TyArray, TyBool, TyInt, TyPath, TyRange,
     UnOp, Variant,
 };
 
-type IResult<'a, T, E = ErrorTree<Span<'a>>> = nom::IResult<Span<'a>, T, E>;
+type TError<'a, I = Span<'a>> =
+    GenericErrorTree<I, &'a str, &'a str, Box<dyn Error + Send + Sync + 'static>>;
 
-pub fn parse(i: &str) -> Result<Vec<Decl<'_>>, ErrorTree<Span<'_>>> {
-    final_parser(file)(Span::new(i))
+type IResult<'a, T, E = TError<'a>> = nom::IResult<Span<'a>, T, E>;
+
+pub fn parse(i: &str) -> Result<Vec<Decl<'_>>, TError<'_, Loc<'_>>> {
+    final_parser(file)(Span::new(i)).map_err(|e: TError<'_>| e.map_locations(Loc::from))
 }
 
 fn leading_ws<'a, F, O, E>(inner: F) -> impl FnMut(Span<'a>) -> IResult<'a, O, E>
@@ -39,9 +44,7 @@ where
     preceded(multispace0, inner)
 }
 
-fn ws_tag<'a, E: ParseError<Span<'a>> + 'a>(
-    s: &'a str,
-) -> impl FnMut(Span<'a>) -> IResult<'a, Span<'a>, E> {
+fn ws_tag<'a>(s: &'a str) -> impl FnMut(Span<'a>) -> IResult<'a, Span<'a>> {
     leading_ws(tag(s))
 }
 
@@ -144,7 +147,15 @@ fn ident(i: Span<'_>) -> IResult<'_, Span<'_>> {
 }
 
 fn ident_exact<'a>(expected: &'a str) -> impl FnMut(Span<'a>) -> IResult<'a, Span<'a>> {
-    verify(ident, move |s: &Span<'_>| *s.fragment() == expected)
+    move |i| {
+        let (i, s) = ident(i)?;
+
+        if *s.fragment() == expected {
+            Ok((i, s))
+        } else {
+            Err(Err::Error(TError::from_tag(s, expected)))
+        }
+    }
 }
 
 fn keyword<'a>(kw: Keyword) -> impl FnMut(Span<'a>) -> IResult<'a, Keyword> {
@@ -181,7 +192,7 @@ fn name(i: Span<'_>) -> IResult<'_, Name<'_>> {
         map_res(ident, |s: Span<'_>| {
             Some(s)
                 .filter(|s| Keyword::from_str(s.fragment()).is_none())
-                .ok_or("the name is reversed")
+                .ok_or_else(|| format!("the name `{s}` is reserved"))
         }),
         |name| Name { name },
     )(i)
@@ -244,7 +255,7 @@ fn decl_var(i: Span<'_>) -> IResult<'_, DeclVar<'_>> {
                 cut(tuple((
                     binding,
                     preceded(ws_tag(":"), ty),
-                    opt(preceded(ws_tag("="), expr)),
+                    opt(preceded(ws_tag("="), cut(expr))),
                 ))),
             )),
             cut(eol),
@@ -277,9 +288,9 @@ fn ty(i: Span<'_>) -> IResult<'_, Ty<'_>> {
     alt((
         ty_int.map(Ty::Int),
         ty_bool.map(Ty::Bool),
-        ty_range.map(Ty::Range),
         ty_array.map(Ty::Array),
         ty_path.map(Ty::Path),
+        ty_range.map(Ty::Range),
     ))(i)
 }
 
@@ -328,7 +339,7 @@ fn ty_array(i: Span<'_>) -> IResult<'_, TyArray<'_>> {
 }
 
 fn ty_path(i: Span<'_>) -> IResult<'_, TyPath<'_>> {
-    map(path, |path| TyPath {
+    map(terminated(path, peek(not(ws_tag("..")))), |path| TyPath {
         id: Default::default(),
         path,
     })(i)
@@ -535,7 +546,7 @@ fn arm(i: Span<'_>) -> IResult<'_, Arm<'_>> {
 fn stmt_assign_next(i: Span<'_>) -> IResult<'_, StmtAssignNext<'_>> {
     map(
         leading_ws(terminated(
-            consumed(separated_pair(expr, ws_tag("<-"), cut(expr))),
+            consumed(separated_pair(expr_index, ws_tag("<-"), cut(expr))),
             cut(eol),
         )),
         |(span, (lhs, rhs))| StmtAssignNext {
@@ -814,12 +825,12 @@ struct UnrecognizedBuiltinName(String);
 impl Error for UnrecognizedBuiltinName {}
 
 fn builtin_func_name(i: Span<'_>) -> IResult<'_, (Builtin, Name<'_>)> {
-    map_res(name, |name: Name<'_>| {
+    map_res(ident, |ident: Span<'_>| {
         BUILTIN_NAMES
-            .get(name.name.fragment())
+            .get(ident.fragment())
             .copied()
-            .ok_or_else(|| UnrecognizedBuiltinName(name.to_string()))
-            .map(|builtin| (builtin, name))
+            .ok_or_else(|| UnrecognizedBuiltinName(ident.to_string()))
+            .map(|builtin| (builtin, Name { name: ident }))
     })(i)
 }
 

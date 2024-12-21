@@ -56,13 +56,7 @@ fn main() -> ExitCode {
 
         let output = match &args.output {
             Some(path) => {
-                let result = if args.force {
-                    File::create(path)
-                } else {
-                    File::create_new(path)
-                };
-
-                match result {
+                match File::create(path) {
                     Ok(file) => f = file,
 
                     Err(e) => {

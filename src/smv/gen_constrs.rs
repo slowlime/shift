@@ -434,8 +434,8 @@ impl<'a, 'b, D: DiagCtx> Pass<'a, 'b, D> {
             if let Some(init) = &decl.init {
                 let rhs = self.lower_expr(init);
                 let lhs = self.smv.exprs.insert(
-                    SmvExprNext {
-                        var_id: self.smv.var_map[decl.id],
+                    SmvExprName {
+                        kind: SmvNameKind::Var(self.smv.var_map[decl.id]),
                     }
                     .into(),
                 );
@@ -718,13 +718,20 @@ impl<'a, D: DiagCtx> Pass<'a, '_, D> {
     }
 
     fn lower_binding(&mut self, binding_id: BindingId, assignee: bool) -> SmvExprId {
-        let bindings = if assignee {
-            &self.env.assignee_bindings
-        } else {
-            &self.env.bindings
-        };
-        if let Some(&expr_id) = bindings.get(binding_id) {
-            return expr_id;
+        let mut parent_env = Some(&self.env);
+
+        while let Some(env) = parent_env {
+            let bindings = if assignee {
+                &env.assignee_bindings
+            } else {
+                &env.bindings
+            };
+
+            if let Some(&expr_id) = bindings.get(binding_id) {
+                return expr_id;
+            }
+
+            parent_env = env.parent.as_ref();
         }
 
         let binding_kind = self.smv.module.bindings[binding_id].kind.as_ref().unwrap();
@@ -927,10 +934,13 @@ impl<'a, D: DiagCtx> Pass<'a, '_, D> {
         for var in &stmt.vars {
             match var {
                 DefaultingVar::Var(expr) => {
-                    self.lower_expr(expr);
+                    self.lower_expr_with_opts(expr, true);
                 }
 
-                DefaultingVar::Alias(stmt) => self.lower_stmt(stmt)?,
+                DefaultingVar::Alias(stmt) => {
+                    self.lower_stmt(stmt)?;
+                    self.lower_binding(stmt.as_alias().binding.id, true);
+                }
             }
         }
 

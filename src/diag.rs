@@ -83,7 +83,7 @@ impl DiagCtx for StderrDiagCtx {
         for note in diag.notes {
             let _ = write!(buf, "  note");
 
-            if let Some(loc) = diag.loc {
+            if let Some(loc) = note.loc {
                 let _ = write!(buf, " at {loc}");
             }
 

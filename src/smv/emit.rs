@@ -151,7 +151,9 @@ impl<'a, W: Write> Emitter<'a, W> {
     fn emit_expr_prec(&mut self, expr_id: SmvExprId, prec: usize) -> io::Result<()> {
         match &self.smv.exprs[expr_id] {
             SmvExpr::Int(expr) => write!(self.writer, "{}", expr.value),
-            SmvExpr::Bool(expr) => write!(self.writer, "{}", expr.value),
+            SmvExpr::Bool(expr) => {
+                write!(self.writer, "{}", if expr.value { "TRUE" } else { "FALSE" })
+            }
 
             SmvExpr::Name(expr) => match expr.kind {
                 SmvNameKind::Var(var_id) => write!(self.writer, "{}", self.smv.vars[var_id].name),

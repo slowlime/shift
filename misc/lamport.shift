@@ -47,7 +47,7 @@ trans {
             acquiring <- true
             i <- 0
             next_ticket <- 0
-            state <- State::Entering
+            state <- State::Choosing
           }
 
           State::Choosing => {

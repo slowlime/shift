@@ -9,10 +9,6 @@ pub struct Args {
     /// Path to the output file.
     #[arg(short, long)]
     pub output: Option<PathBuf>,
-
-    /// Overwrite the output file if it exists.
-    #[arg(short, long)]
-    pub force: bool,
 }
 
 impl Args {

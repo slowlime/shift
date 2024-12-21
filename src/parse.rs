@@ -136,12 +136,6 @@ fn eol(i: Span<'_>) -> IResult<'_, ()> {
     value((), preceded(space0, alt((line_ending, eof))))(i)
 }
 
-fn ident_char(i: Span<'_>) -> IResult<'_, char> {
-    map(alt((alphanumeric1, tag("_"))), |s: Span<'_>| {
-        s.fragment().chars().next().unwrap()
-    })(i)
-}
-
 fn ident(i: Span<'_>) -> IResult<'_, Span<'_>> {
     leading_ws(recognize(pair(
         alt((alpha1, tag("_"))),
@@ -522,17 +516,6 @@ fn stmt_match(i: Span<'_>) -> IResult<'_, StmtMatch<'_>> {
             arms,
         },
     )(i)
-}
-
-fn cut_once<F, I, O, E>(f: F) -> impl FnOnce(I) -> nom::IResult<I, O, E>
-where
-    F: FnOnce(I) -> nom::IResult<I, O, E>,
-    E: ParseError<I>,
-{
-    move |i: I| match f(i) {
-        Err(nom::Err::Error(e)) => Err(nom::Err::Failure(e)),
-        r => r,
-    }
 }
 
 fn arm(i: Span<'_>) -> IResult<'_, Arm<'_>> {

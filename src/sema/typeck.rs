@@ -21,11 +21,6 @@ impl Module<'_> {
     }
 }
 
-struct AliasInfo<'src> {
-    def: Expr<'src>,
-    binding_id: BindingId,
-}
-
 struct Pass<'src, 'm, D> {
     m: &'m mut Module<'src>,
     diag: &'m mut D,
@@ -942,7 +937,7 @@ impl<'src, 'a, D: DiagCtx> ConstEvaluator<'src, 'a, D> {
         self.exprs[expr.id].value = Some(ConstValue::Error);
         self.err_at(
             expr.loc(),
-            format!("array expressions cannot be evaluated in a constant context"),
+            "array expressions cannot be evaluated in a constant context".into(),
         );
 
         Err(())
@@ -953,7 +948,7 @@ impl<'src, 'a, D: DiagCtx> ConstEvaluator<'src, 'a, D> {
         self.exprs[expr.id].value = Some(ConstValue::Error);
         self.err_at(
             expr.loc(),
-            format!("index expressions cannot be evaluated in a constant context"),
+            "index expressions cannot be evaluated in a constant context".into(),
         );
 
         Err(())

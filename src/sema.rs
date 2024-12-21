@@ -155,7 +155,7 @@ pub struct Module<'a> {
     array_tys: HashMap<(TyDefId, usize), TyDefId>,
 }
 
-impl<'a> Module<'a> {
+impl Module<'_> {
     fn new() -> Self {
         Self {
             decls: Default::default(),

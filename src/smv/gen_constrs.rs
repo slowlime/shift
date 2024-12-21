@@ -676,9 +676,9 @@ impl<'a> Pass<'a, '_> {
                 }
             }
 
-            fn cond(&self) -> Option<&'b Expr<'a>> {
+            fn cond(&self) -> Option<(bool, &'b Expr<'a>)> {
                 match self {
-                    Self::If(stmt) => Some(&stmt.cond),
+                    Self::If(stmt) => Some((stmt.is_unless, &stmt.cond)),
                     Self::Else(_) | Self::SyntheticElse => None,
                 }
             }
@@ -699,8 +699,20 @@ impl<'a> Pass<'a, '_> {
                 );
             }
 
-            if let Some(cond) = branch.cond() {
-                branch_conds.push(self.lower_expr(cond));
+            if let Some((negate, cond)) = branch.cond() {
+                let mut cond = self.lower_expr(cond);
+
+                if negate {
+                    cond = self.smv.exprs.insert(
+                        SmvExprUnary {
+                            op: SmvUnOp::Not,
+                            rhs: cond,
+                        }
+                        .into(),
+                    );
+                }
+
+                branch_conds.push(cond);
             }
 
             let if_cond = mem::take(&mut self.cond);

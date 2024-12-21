@@ -5,8 +5,8 @@ use std::sync::LazyLock;
 
 use derive_more::derive::Display;
 use nom::branch::alt;
-use nom::bytes::complete::take;
-use nom::character::complete::{alpha1, alphanumeric1, digit1, line_ending, multispace0, space0};
+use nom::bytes::complete::{is_not, take};
+use nom::character::complete::{alpha1, alphanumeric1, digit1, line_ending, multispace0, multispace1, space0};
 use nom::combinator::{
     consumed, cut, eof, flat_map, map, map_res, not, opt, peek, recognize, value, verify,
 };
@@ -36,12 +36,15 @@ pub fn parse(i: &str) -> Result<Vec<Decl<'_>>, TError<'_, Loc<'_>>> {
     final_parser(file)(Span::new(i)).map_err(|e: TError<'_>| e.map_locations(Loc::from))
 }
 
-fn leading_ws<'a, F, O, E>(inner: F) -> impl FnMut(Span<'a>) -> IResult<'a, O, E>
+fn line_comment(i: Span<'_>) -> IResult<'_, Span<'_>> {
+    preceded(tag("//"), is_not("\r\n"))(i)
+}
+
+fn leading_ws<'a, F, O>(inner: F) -> impl FnMut(Span<'a>) -> IResult<'a, O>
 where
-    E: ParseError<Span<'a>>,
-    F: Parser<Span<'a>, O, E> + 'a,
+    F: Parser<Span<'a>, O, TError<'a>> + 'a,
 {
-    preceded(multispace0, inner)
+    preceded(many0(alt((multispace1, line_comment))), inner)
 }
 
 fn ws_tag<'a>(s: &'a str) -> impl FnMut(Span<'a>) -> IResult<'a, Span<'a>> {

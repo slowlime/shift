@@ -24,11 +24,13 @@ trans {
   const for self_idx in 0..N {
     alias stall = stall[self_idx]
 
-    either {
-      stall <- true
-    } or {
-      stall <- false
-    }
+    stall <- !stall
+
+    // either {
+    //   stall <- true
+    // } or {
+    //   stall <- false
+    // }
 
     defaulting {
       alias acquiring = acquiring[self_idx]

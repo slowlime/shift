@@ -288,9 +288,9 @@ impl BitAndAssign for CondAssign {
     fn bitand_assign(&mut self, rhs: Self) {
         *self.cond &= *rhs.cond;
 
-        for (binding_id, exprs) in rhs.assignments {
+        for (assignee, exprs) in rhs.assignments {
             self.assignments
-                .entry(binding_id)
+                .entry(assignee)
                 .unwrap()
                 .or_default()
                 .extend(exprs);

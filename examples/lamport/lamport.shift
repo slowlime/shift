@@ -15,7 +15,7 @@ enum State {
 
 var acquiring: [bool; N] = [false; N]
 var ticket: [int; N] = [0; N]
-var i: [0..N + 1; N]
+var i: [0..N; N]
 var next_ticket: [int; N]
 var state: [State; N] = [State::Unsynchronized; N]
 var stall: [bool; N] = [false; N]

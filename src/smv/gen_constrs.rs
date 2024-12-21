@@ -16,9 +16,9 @@ use crate::sema::{BindingKind, ConstValue, TyDef, TyDefId};
 use crate::smv::{SmvExprFunc, SmvFunc};
 
 use super::{
-    Result, Smv, SmvBinOp, SmvExprBinary, SmvExprBool, SmvExprId, SmvExprInt, SmvExprName,
-    SmvExprNext, SmvExprUnary, SmvInit, SmvNameKind, SmvTrans, SmvTy, SmvTyArray, SmvTyEnum,
-    SmvTyId, SmvTyRange, SmvUnOp, SmvVar, SmvVariant,
+    Result, Smv, SmvBinOp, SmvExprBinary, SmvExprBool, SmvExprId, SmvExprIndex, SmvExprInt,
+    SmvExprName, SmvExprNext, SmvExprUnary, SmvInit, SmvNameKind, SmvTrans, SmvTy, SmvTyArray,
+    SmvTyEnum, SmvTyId, SmvTyRange, SmvUnOp, SmvVar, SmvVariant,
 };
 
 impl Smv<'_> {
@@ -371,7 +371,7 @@ impl<'a, 'b, D: DiagCtx> Pass<'a, 'b, D> {
                 lo: self.smv.exprs.insert(SmvExprInt { value: 0 }.into()),
                 hi: self.smv.exprs.insert(
                     SmvExprInt {
-                        value: len.try_into().unwrap(),
+                        value: i64::try_from(len).unwrap().checked_sub(1).unwrap(),
                     }
                     .into(),
                 ),
@@ -822,13 +822,7 @@ impl<'a, D: DiagCtx> Pass<'a, '_, D> {
         let base = self.lower_expr_with_opts(&expr.base, assignee);
         let index = self.lower_expr_with_opts(&expr.index, false);
 
-        self.smv.exprs.insert(
-            SmvExprFunc {
-                func: SmvFunc::Read,
-                args: vec![base, index],
-            }
-            .into(),
-        )
+        self.smv.exprs.insert(SmvExprIndex { base, index }.into())
     }
 
     fn lower_expr_binary(&mut self, expr: &ExprBinary<'a>, _assignee: bool) -> SmvExprId {

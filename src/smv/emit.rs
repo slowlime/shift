@@ -169,6 +169,15 @@ impl<'a, W: Write> Emitter<'a, W> {
 
             SmvExpr::Next(expr) => write!(self.writer, "next({})", self.smv.vars[expr.var_id].name),
 
+            SmvExpr::Index(expr) => {
+                self.emit_expr_prec(expr.base, expr.prec())?;
+                write!(self.writer, "[")?;
+                self.emit_expr_prec(expr.index, 0)?;
+                write!(self.writer, "]")?;
+
+                Ok(())
+            }
+
             SmvExpr::Func(expr) => {
                 match expr.func {
                     SmvFunc::Min => write!(self.writer, "min(")?,

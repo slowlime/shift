@@ -94,6 +94,13 @@ impl<'a> Smv<'a> {
 
                     SmvExpr::Next(expr) => write!(f, "next({})", self.0.vars[expr.var_id].name),
 
+                    SmvExpr::Index(expr) => write!(
+                        f,
+                        "{}[{}]",
+                        self.0.display_expr_prec(expr.base, expr.prec()),
+                        self.0.display_expr_prec(expr.index, 0),
+                    ),
+
                     SmvExpr::Func(expr) => {
                         match expr.func {
                             SmvFunc::Min => write!(f, "min(")?,
@@ -206,6 +213,7 @@ pub enum SmvExpr {
     Bool(SmvExprBool),
     Name(SmvExprName),
     Next(SmvExprNext),
+    Index(SmvExprIndex),
     Func(SmvExprFunc),
     Binary(SmvExprBinary),
     Unary(SmvExprUnary),
@@ -235,6 +243,18 @@ pub struct SmvExprName {
 #[derive(Debug, Clone)]
 pub struct SmvExprNext {
     pub var_id: SmvVarId,
+}
+
+#[derive(Debug, Clone)]
+pub struct SmvExprIndex {
+    pub base: SmvExprId,
+    pub index: SmvExprId,
+}
+
+impl SmvExprIndex {
+    pub fn prec(&self) -> usize {
+        14
+    }
 }
 
 #[derive(Debug, Clone)]

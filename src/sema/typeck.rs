@@ -144,6 +144,9 @@ impl<'src, 'm, D: DiagCtx> Pass<'src, 'm, D> {
             &self.m.ty_defs[expected_ty_def_id],
         ) {
             (TyDef::Range(..), TyDef::Int) | (TyDef::Int, TyDef::Range(..)) => true,
+            (TyDef::Array(lhs_elem_ty_id, lhs_len), TyDef::Array(rhs_elem_ty_id, rhs_len)) => {
+                lhs_len == rhs_len && self.ty_conforms_to(*lhs_elem_ty_id, *rhs_elem_ty_id)
+            }
             _ => false,
         }
     }
@@ -190,7 +193,7 @@ impl<'src, 'm, D: DiagCtx> Pass<'src, 'm, D> {
         debug_assert_ne!(
             ty_def_id,
             Default::default(),
-            "trying to assign a null ty_def_id"
+            "trying to assign a null ty_def_id",
         );
         let expr_info = &mut self.m.exprs[expr_id];
         expr_info.ty_def_id = ty_def_id;

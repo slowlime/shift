@@ -1,4 +1,5 @@
 const N = 2
+const MAX = 8192
 
 enum State {
   Unsynchronized,
@@ -14,9 +15,9 @@ enum State {
 }
 
 var acquiring: [bool; N] = [false; N]
-var ticket: [int; N] = [0; N]
+var ticket: [0..MAX; N] = [0; N]
 var i: [0..N; N]
-var next_ticket: [int; N]
+var next_ticket: [0..MAX; N]
 var state: [State; N] = [State::Unsynchronized; N]
 var stall: [bool; N] = [false; N]
 
@@ -95,6 +96,7 @@ trans {
 
           State::BreakingTies => {
             unless ::ticket[i] != 0 {
+              i <- i + 1
               state <- State::AwaitingAcquisition
             }
           }

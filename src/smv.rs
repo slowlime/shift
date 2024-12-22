@@ -61,7 +61,7 @@ impl<'a> Smv<'a> {
 
     pub fn new_synthetic_var(&mut self, prefix: &str, ty_id: SmvTyId) -> SmvVarId {
         let idx = self.next_synthetic_var_idx;
-        let name = format!("${prefix}#{idx}");
+        let name = format!("_${prefix}#{idx}");
         self.next_synthetic_var_idx += 1;
 
         self.vars.insert(SmvVar { name, ty_id })

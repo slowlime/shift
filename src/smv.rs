@@ -1,10 +1,11 @@
 mod emit;
 mod gen_constrs;
 
+use std::collections::HashMap;
 use std::fmt::{self, Display};
 
 use derive_more::derive::{Display, From};
-use slotmap::{new_key_type, SecondaryMap, SlotMap, SparseSecondaryMap};
+use slotmap::{new_key_type, Key, SecondaryMap, SlotMap, SparseSecondaryMap};
 
 use crate::ast::DeclId;
 use crate::diag::DiagCtx;
@@ -33,9 +34,13 @@ pub struct Smv<'a> {
     pub invar: SlotMap<SmvInvarId, SmvInvar>,
     pub var_map: SecondaryMap<DeclId, SmvVarId>,
     pub ty_map: SecondaryMap<TyDefId, SmvTyId>,
-    // used for constarray expressions.
     pub ty_var_map: SparseSecondaryMap<SmvTyId, SmvVarId>,
-    pub next_synthetic_var_idx: usize,
+    next_synthetic_var_idx: usize,
+    array_tys: HashMap<SmvTyArray, SmvTyId>,
+    range_tys: HashMap<SmvTyRange, SmvTyId>,
+    lit_exprs: HashMap<Literal, SmvExprId>,
+    pub integer_ty_id: SmvTyId,
+    pub boolean_ty_id: SmvTyId,
 }
 
 impl<'a> Smv<'a> {
@@ -53,10 +58,60 @@ impl<'a> Smv<'a> {
             ty_map: Default::default(),
             ty_var_map: Default::default(),
             next_synthetic_var_idx: 0,
+            array_tys: Default::default(),
+            range_tys: Default::default(),
+            lit_exprs: Default::default(),
+            integer_ty_id: Default::default(),
+            boolean_ty_id: Default::default(),
         };
         smv.gen_constrs(diag)?;
 
         Ok(smv)
+    }
+
+    pub fn insert_array_ty(&mut self, array_ty: SmvTyArray) -> SmvTyId {
+        *self
+            .array_tys
+            .entry(array_ty)
+            .or_insert_with_key(|ty| self.tys.insert(ty.clone().into()))
+    }
+
+    pub fn insert_range_ty(&mut self, range_ty: SmvTyRange) -> SmvTyId {
+        *self
+            .range_tys
+            .entry(range_ty)
+            .or_insert_with_key(|ty| self.tys.insert(ty.clone().into()))
+    }
+
+    pub fn insert_ty(&mut self, ty: SmvTy) -> SmvTyId {
+        let mut cache = None;
+
+        match ty {
+            SmvTy::Boolean if !self.boolean_ty_id.is_null() => return self.boolean_ty_id,
+            SmvTy::Boolean => cache = Some(&mut self.boolean_ty_id),
+            SmvTy::Integer if !self.integer_ty_id.is_null() => return self.integer_ty_id,
+            SmvTy::Integer => cache = Some(&mut self.integer_ty_id),
+            SmvTy::Enum(_) => {}
+            SmvTy::Range(ty) => return self.insert_range_ty(ty),
+            SmvTy::Array(ty) => return self.insert_array_ty(ty),
+        }
+
+        let ty_id = self.tys.insert(ty);
+
+        if let Some(cache) = cache {
+            *cache = ty_id;
+        }
+
+        ty_id
+    }
+
+    pub fn insert_literal(&mut self, lit: impl Into<Literal>) -> SmvExprId {
+        *self.lit_exprs.entry(lit.into()).or_insert_with_key(|lit| {
+            self.exprs.insert(match *lit {
+                Literal::Int(value) => SmvExprInt { value }.into(),
+                Literal::Bool(value) => SmvExprBool { value }.into(),
+            })
+        })
     }
 
     pub fn new_synthetic_var(&mut self, prefix: &str, ty_id: SmvTyId) -> SmvVarId {
@@ -65,6 +120,57 @@ impl<'a> Smv<'a> {
         self.next_synthetic_var_idx += 1;
 
         self.vars.insert(SmvVar { name, ty_id })
+    }
+
+    pub fn display_ty(&self, ty_id: SmvTyId) -> impl Display + '_ {
+        struct Fmt<'a, 'b>(&'b Smv<'a>, SmvTyId);
+
+        impl Display for Fmt<'_, '_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match &self.0.tys[self.1] {
+                    SmvTy::Boolean => write!(f, "boolean"),
+                    SmvTy::Integer => write!(f, "integer"),
+
+                    SmvTy::Enum(ty) => {
+                        if ty.variants.is_empty() {
+                            return write!(f, "{{}}");
+                        }
+
+                        write!(f, "{{ ")?;
+
+                        for (idx, variant) in ty.variants.iter().enumerate() {
+                            if idx > 0 {
+                                write!(f, ", ")?;
+                            }
+
+                            match variant {
+                                SmvVariant::Int(value) => write!(f, "{value}")?,
+                                SmvVariant::Sym(sym) => write!(f, "{sym}")?,
+                            }
+                        }
+
+                        write!(f, " }}")
+                    }
+
+                    SmvTy::Range(ty) => write!(
+                        f,
+                        "{}..{}",
+                        self.0.display_expr(ty.lo),
+                        self.0.display_expr(ty.hi),
+                    ),
+
+                    SmvTy::Array(ty) => write!(
+                        f,
+                        "array {}..{} of {}",
+                        self.0.display_expr(ty.lo),
+                        self.0.display_expr(ty.hi),
+                        self.0.display_ty(ty.elem_ty_id),
+                    ),
+                }
+            }
+        }
+
+        Fmt(self, ty_id)
     }
 
     pub fn display_expr(&self, expr_id: SmvExprId) -> impl Display + '_ {
@@ -171,7 +277,7 @@ impl<'a> Smv<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(From, Debug, Clone)]
 pub enum SmvTy {
     Boolean,
     Integer,
@@ -194,17 +300,23 @@ pub enum SmvVariant {
     Sym(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SmvTyRange {
     pub lo: SmvExprId,
     pub hi: SmvExprId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SmvTyArray {
     pub lo: SmvExprId,
     pub hi: SmvExprId,
     pub elem_ty_id: SmvTyId,
+}
+
+#[derive(From, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Literal {
+    Int(i64),
+    Bool(bool),
 }
 
 #[derive(From, Debug, Clone)]

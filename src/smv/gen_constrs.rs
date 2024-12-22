@@ -16,9 +16,9 @@ use crate::sema::{BindingKind, ConstValue, TyDef, TyDefId};
 use crate::smv::{SmvExprFunc, SmvFunc};
 
 use super::{
-    Result, Smv, SmvBinOp, SmvExprBinary, SmvExprBool, SmvExprId, SmvExprIndex, SmvExprInt,
-    SmvExprName, SmvExprNext, SmvExprUnary, SmvInit, SmvNameKind, SmvTrans, SmvTy, SmvTyArray,
-    SmvTyEnum, SmvTyId, SmvTyRange, SmvUnOp, SmvVar, SmvVariant,
+    Result, Smv, SmvBinOp, SmvExprBinary, SmvExprId, SmvExprIndex, SmvExprName, SmvExprNext,
+    SmvExprUnary, SmvInit, SmvNameKind, SmvTrans, SmvTy, SmvTyArray, SmvTyEnum, SmvTyId,
+    SmvTyRange, SmvUnOp, SmvVar, SmvVariant,
 };
 
 impl Smv<'_> {
@@ -363,18 +363,15 @@ impl<'a, 'b, D: DiagCtx> Pass<'a, 'b, D> {
             TyDef::Error => unreachable!(),
 
             TyDef::Range(lo, hi) => SmvTy::Range(SmvTyRange {
-                lo: self.smv.exprs.insert(SmvExprInt { value: lo }.into()),
-                hi: self.smv.exprs.insert(SmvExprInt { value: hi }.into()),
+                lo: self.smv.insert_literal(lo),
+                hi: self.smv.insert_literal(hi),
             }),
 
             TyDef::Array(ty_def_id, len) => SmvTy::Array(SmvTyArray {
-                lo: self.smv.exprs.insert(SmvExprInt { value: 0 }.into()),
-                hi: self.smv.exprs.insert(
-                    SmvExprInt {
-                        value: i64::try_from(len).unwrap().checked_sub(1).unwrap(),
-                    }
-                    .into(),
-                ),
+                lo: self.smv.insert_literal(0),
+                hi: self
+                    .smv
+                    .insert_literal(i64::try_from(len).unwrap().checked_sub(1).unwrap()),
                 elem_ty_id: self.lower_ty_def(ty_def_id),
             }),
 
@@ -390,10 +387,28 @@ impl<'a, 'b, D: DiagCtx> Pass<'a, 'b, D> {
             }
         };
 
-        let smv_ty_id = self.smv.tys.insert(smv_ty);
+        let smv_ty_id = self.smv.insert_ty(smv_ty);
         self.smv.ty_map.insert(ty_def_id, smv_ty_id);
 
         smv_ty_id
+    }
+
+    fn generalize_ty(&mut self, ty_id: SmvTyId) -> SmvTyId {
+        match self.smv.tys[ty_id] {
+            SmvTy::Range(_) => self.smv.insert_ty(SmvTy::Integer),
+
+            SmvTy::Array(SmvTyArray { lo, hi, elem_ty_id }) => {
+                let generalized_elem_ty_id = self.generalize_ty(elem_ty_id);
+
+                self.smv.insert_ty(SmvTy::Array(SmvTyArray {
+                    lo,
+                    hi,
+                    elem_ty_id: generalized_elem_ty_id,
+                }))
+            }
+
+            _ => ty_id,
+        }
     }
 
     fn prepare_env(&mut self) {
@@ -427,7 +442,9 @@ impl<'a, 'b, D: DiagCtx> Pass<'a, 'b, D> {
                 ty_id,
             });
             self.smv.var_map.insert(decl.id, smv_var_id);
-            self.smv.ty_var_map.insert(ty_id, smv_var_id);
+
+            let generalized_ty_id = self.generalize_ty(ty_id);
+            self.smv.ty_var_map.insert(generalized_ty_id, smv_var_id);
         }
 
         for decl in var_decls {
@@ -692,8 +709,8 @@ impl<'a, D: DiagCtx> Pass<'a, '_, D> {
 
     fn reify_const_value(&mut self, value: &ConstValue) -> SmvExprId {
         match value {
-            &ConstValue::Int(value) => self.smv.exprs.insert(SmvExprInt { value }.into()),
-            &ConstValue::Bool(value) => self.smv.exprs.insert(SmvExprBool { value }.into()),
+            &ConstValue::Int(value) => self.smv.insert_literal(value),
+            &ConstValue::Bool(value) => self.smv.insert_literal(value),
             &ConstValue::Variant(decl_id, idx) => self.lower_variant_name(decl_id, idx),
             ConstValue::Error => unreachable!(),
         }
@@ -782,15 +799,11 @@ impl<'a, D: DiagCtx> Pass<'a, '_, D> {
     }
 
     fn lower_expr_bool(&mut self, expr: &ExprBool<'a>, _assignee: bool) -> SmvExprId {
-        self.smv
-            .exprs
-            .insert(SmvExprBool { value: expr.value }.into())
+        self.smv.insert_literal(expr.value)
     }
 
     fn lower_expr_int(&mut self, expr: &ExprInt<'a>, _assignee: bool) -> SmvExprId {
-        self.smv
-            .exprs
-            .insert(SmvExprInt { value: expr.value }.into())
+        self.smv.insert_literal(expr.value)
     }
 
     fn lower_expr_array_repeat(
@@ -801,12 +814,14 @@ impl<'a, D: DiagCtx> Pass<'a, '_, D> {
         let ty_def_id = self.smv.module.exprs[expr.id].ty_def_id;
         let ty_id = self.lower_ty_def(ty_def_id);
 
-        if !self.smv.ty_var_map.contains_key(ty_id) {
-            let var_id = self.smv.new_synthetic_var("array-ty", ty_id);
-            self.smv.ty_var_map.insert(ty_id, var_id);
+        let generalized_ty_id = self.generalize_ty(ty_id);
+
+        if !self.smv.ty_var_map.contains_key(generalized_ty_id) {
+            let var_id = self.smv.new_synthetic_var("array-ty", generalized_ty_id);
+            self.smv.ty_var_map.insert(generalized_ty_id, var_id);
         }
 
-        let tyof_var_id = self.smv.ty_var_map[ty_id];
+        let tyof_var_id = self.smv.ty_var_map[generalized_ty_id];
         let elem = self.lower_expr_with_opts(&expr.expr, false);
 
         self.smv.exprs.insert(
@@ -1090,9 +1105,7 @@ impl<'a, D: DiagCtx> Pass<'a, '_, D> {
         }
 
         let if_cond = if_cond.unwrap_or_else(|| CondAssign {
-            cond: Box::new(Cond::Expr(
-                self.smv.exprs.insert(SmvExprBool { value: false }.into()),
-            )),
+            cond: Box::new(Cond::Expr(self.smv.insert_literal(false))),
             ..Default::default()
         });
 
@@ -1145,9 +1158,7 @@ impl<'a, D: DiagCtx> Pass<'a, '_, D> {
         }
 
         let match_cond = match_cond.unwrap_or_else(|| CondAssign {
-            cond: Box::new(Cond::Expr(
-                self.smv.exprs.insert(SmvExprBool { value: false }.into()),
-            )),
+            cond: Box::new(Cond::Expr(self.smv.insert_literal(false))),
             ..Default::default()
         });
 
@@ -1201,9 +1212,7 @@ impl<'a, D: DiagCtx> Pass<'a, '_, D> {
         }
 
         let either_cond = either_cond.unwrap_or_else(|| CondAssign {
-            cond: Box::new(Cond::Expr(
-                self.smv.exprs.insert(SmvExprBool { value: false }.into()),
-            )),
+            cond: Box::new(Cond::Expr(self.smv.insert_literal(false))),
             ..Default::default()
         });
 
@@ -1218,7 +1227,7 @@ impl<'a, D: DiagCtx> Pass<'a, '_, D> {
 impl<D: DiagCtx> Pass<'_, '_, D> {
     fn lower_cond(&mut self, cond: &Cond) -> SmvExprId {
         match cond {
-            Cond::True => self.smv.exprs.insert(SmvExprBool { value: true }.into()),
+            Cond::True => self.smv.insert_literal(true),
             Cond::Expr(expr_id) => *expr_id,
 
             Cond::And(conj) => {
@@ -1292,7 +1301,7 @@ impl<D: DiagCtx> Pass<'_, '_, D> {
                     .into(),
                 )
             })
-            .unwrap_or_else(|| self.smv.exprs.insert(SmvExprBool { value: true }.into()))
+            .unwrap_or_else(|| self.smv.insert_literal(true))
     }
 
     fn make_or(&mut self, exprs: &[SmvExprId]) -> SmvExprId {
@@ -1309,6 +1318,6 @@ impl<D: DiagCtx> Pass<'_, '_, D> {
                     .into(),
                 )
             })
-            .unwrap_or_else(|| self.smv.exprs.insert(SmvExprBool { value: false }.into()))
+            .unwrap_or_else(|| self.smv.insert_literal(false))
     }
 }

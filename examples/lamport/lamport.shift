@@ -1,5 +1,5 @@
 const N = 2
-const MAX = 8192
+const MAX = 511
 
 enum State {
   Unsynchronized,
@@ -16,7 +16,7 @@ enum State {
 
 var acquiring: [bool; N] = [false; N]
 var ticket: [0..MAX; N] = [0; N]
-var i: [0..N; N]
+var i: [0..N - 1; N]
 var next_ticket: [0..MAX; N]
 var state: [State; N] = [State::Unsynchronized; N]
 var stall: [bool; N] = [false; N]
@@ -25,8 +25,13 @@ trans {
   const for self_idx in 0..N {
     alias stall = stall[self_idx]
 
-    stall <- !stall
+    // No stalling:
+    stall <- false
 
+    // Alternating stalling:
+    // stall <- !stall
+
+    // Non-deterministic stalling:
     // either {
     //   stall <- true
     // } or {
@@ -54,11 +59,12 @@ trans {
           }
 
           State::Choosing => {
-            if i < N {
-              next_ticket <- max(next_ticket, ::ticket[i])
-              i <- i + 1
-            } else {
+            next_ticket <- max(next_ticket, ::ticket[i])
+
+            if i == N {
               state <- State::Acquiring
+            } else {
+              i <- i + 1
             }
           }
 
@@ -75,29 +81,37 @@ trans {
 
           State::AwaitingAcquisition => {
             if i == self_idx {
-              i <- i + 1
-            } else if i < N && !::acquiring[i] {
+              if i < N - 1 {
+                i <- i + 1
+              } else {
+                state <- State::Critical
+              }
+            } else if !::acquiring[i] {
               state <- State::WaitingInLine
-            } else if i >= N {
-              state <- State::Critical
             }
           }
 
           State::WaitingInLine => {
             unless ::ticket[i] != 0 && ::ticket[i] < ticket {
-              if (::ticket[i] == ticket && i < self_idx) {
+              if ::ticket[i] == ticket && i < self_idx {
                 state <- State::BreakingTies
-              } else {
+              } else if i < N - 1 {
                 i <- i + 1
                 state <- State::AwaitingAcquisition
+              } else {
+                state <- State::Critical
               }
             }
           }
 
           State::BreakingTies => {
             unless ::ticket[i] != 0 {
-              i <- i + 1
-              state <- State::AwaitingAcquisition
+              if i < N - 1 {
+                i <- i + 1
+                state <- State::AwaitingAcquisition
+              } else {
+                state <- State::Critical
+              }
             }
           }
 

@@ -72,6 +72,7 @@ enum Keyword {
     True,
     False,
     Max,
+    Min,
 }
 
 impl Keyword {
@@ -96,6 +97,7 @@ impl Keyword {
             Self::True => "true",
             Self::False => "false",
             Self::Max => "max",
+            Self::Min => "min",
         }
     }
 
@@ -120,6 +122,7 @@ impl Keyword {
             "true" => Self::True,
             "false" => Self::False,
             "max" => Self::Max,
+            "min" => Self::Min,
             _ => return None,
         })
     }
